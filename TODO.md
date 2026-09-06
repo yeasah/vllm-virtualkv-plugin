@@ -210,6 +210,59 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `hybrid-attention` — required, and it gates several retracted conclusions
+
+**Next.** Not a compatibility item: a plugin that cannot page a hybrid model
+is not useful, because hybrids are what gets deployed. And the architecture
+happens to attack the findings this repo gave up on, so the re-tests it
+enables matter as much as the support does.
+
+`~/ckpt/Qwen3.5-9B-exl3-4.00bpw-bq` is local and vLLM registers
+`Qwen3_5ForConditionalGeneration`. What changes:
+
+| | Qwen3-8B (everything measured so far) | Qwen3.5-9B |
+|---|---|---|
+| layers | 36, all full attention | 32, **8 full attention** (every 4th) |
+| query heads | 32 | 16 |
+| head-layer pairs sharing a block table | **1152** | **128** |
+| KV per token | 144 KiB | **32 KiB** |
+| max context | 32k | 262144 |
+
+**What this may exonerate.** `provable skipping is dead` rests on a union over
+1152 head-layer pairs -- a block is undroppable if any one of them wants it.
+At 128 pairs that is a different proposition and the measurement should be
+redone before the conclusion stands. Likewise every mass number here was
+taken below 5k tokens, which `sink-mass` shows is the regime least
+favourable to scoring; 32 KiB/token puts 128k within 4 GiB, so the regime
+where the recency-vs-oracle gap actually opens becomes reachable on one card.
+
+**The work, which is not a one-liner.** The plugin assumes a single KV cache
+group in six places, and a hybrid has two -- full attention, and linear
+attention state:
+
+- `block_tables[0]`, `slot_mappings[0]`, `kernel_block_sizes[0]` index group
+  *zero*, which for a hybrid may be the linear group. The pager would rewrite
+  the wrong table.
+- `kv_cache_groups[0].kv_cache_spec` reads `head_size`/`head_size_v` from
+  whichever group is first.
+- `runner.kv_caches` is handed wholesale to the host tier and to every
+  measurement, so linear-attention state would be copied and reconstructed as
+  though it were K/V.
+
+Index everything by the group whose spec is the paged one. **Assert it rather
+than find it quietly**: reading the wrong tensor as keys yields plausible
+numbers instead of a crash, which is the failure class that has cost this
+repo the most. `block_keys` already refuses to slice hopefully; the group
+identity deserves the same treatment.
+
+Passing non-full-attention specs through untouched is already correct for a
+hybrid, so that part needs nothing.
+
+**Do it on EXL3 with an fp8 cache.** The AWQ checkpoint pays ~28% in
+embeddings, and every tier comparison here used `base_bits=16` because that
+is what AWQ gave -- fp8 is the defensible baseline and halves each degraded
+tier's apparent advantage. Both are fixed by the same move.
+
 ## `sink-mass` — the baseline was a strawman, and that explains the rest
 
 **Two blocks of 112 hold 0.4580 of all attention mass.** The shipped
