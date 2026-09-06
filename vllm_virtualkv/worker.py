@@ -468,7 +468,8 @@ class WorkerPager:
                     saved["resident"], saved["n_full"], queries,
                     saved["block_size"], self._spec.head_size,
                     self.capture.scale, self._spec.head_size_v,
-                    tail=saved["tail"])
+                    tail=saved["tail"],
+                    stale=self.capture.for_row(saved["row_index"], stale=True))
                 if sm is not None:
                     self.summary_rows.append(sm)
                 ws = working_set_step(

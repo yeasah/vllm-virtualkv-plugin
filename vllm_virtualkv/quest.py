@@ -144,6 +144,11 @@ class QueryCapture:
         self.installed = False
         self.layers: list[torch.Tensor] = []
         self.previous: list[torch.Tensor] = []
+        #: Two steps back. A policy cannot use `previous` either -- residency
+        #: for step N is settled before step N's forward, so the newest query
+        #: it can possibly hold is N-1's. Keeping N-2 lets the cost of that
+        #: staleness be measured rather than assumed.
+        self.older: list[torch.Tensor] = []
         self.head_size = 0
         self.num_heads = 0
         #: The softmax scale the kernel will apply. The query captured here is
@@ -187,13 +192,18 @@ class QueryCapture:
     def rotate(self) -> None:
         """Make this step's captures the ones the next step will score with."""
         if self.layers:
+            self.older = self.previous
             self.previous = self.layers
         self.layers = []
 
-    def for_row(self, row: int) -> list[torch.Tensor]:
-        """Last step's queries for one batch row, as [num_heads, head_size]."""
+    def for_row(self, row: int, stale: bool = False) -> list[torch.Tensor]:
+        """Last step's queries for one batch row, as [num_heads, head_size].
+
+        `stale=True` gives the step before that, which is what a policy
+        deciding residency one step ahead actually has.
+        """
         out = []
-        for q in self.previous:
+        for q in (self.older if stale else self.previous):
             if q.ndim == 2 and row < q.shape[0]:
                 out.append(q[row].reshape(-1, self.head_size))
             elif q.ndim == 3 and row < q.shape[0]:

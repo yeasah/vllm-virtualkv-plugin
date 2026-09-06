@@ -104,7 +104,9 @@ def main() -> int:
         order = [("oracle", "oracle (ceiling)"), ("q8", "8-bit keys"),
                  ("q4", "4-bit keys"), ("q2", "2-bit keys"),
                  ("bound", "min/max bound"), ("layer0", "layer-0 queries"),
-                 ("recency", "recency (floor)")]
+                 ("recency", "recency (floor)"),
+                 ("oracle_stale", "oracle, 1 step stale"),
+                 ("q2_stale", "2-bit keys, 1 step stale")]
         for k, label in order:
             if k in sm:
                 print(f"    {label:20s} {sm[k]:.4f}")

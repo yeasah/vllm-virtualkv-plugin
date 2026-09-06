@@ -42,9 +42,34 @@ difference between paging and eviction, is exercised by the tests and not by
 the default policy.
 
 The next real work is a demand signal: something resident that says "you will
-want this block that is not here". Quest-style per-block key bounds are the
-shape of it, and they are not free — roughly 4 KiB per block per layer in fp16
-against a 32 KiB block, out of the same budget.
+want this block that is not here". **That signal is a 2-bit copy of the keys**,
+and the shape of it has been measured rather than assumed. At a budget of 23 of
+90 blocks on a real session, ranking blocks by the mass their pick holds:
+
+| selector | mass captured |
+|---|---|
+| oracle (ceiling) | 0.8756 |
+| **2-bit keys, one step stale — deployable** | **0.8708** |
+| min/max bound | 0.6396 |
+| recency (what ships today) | 0.2743 |
+
+Three results in that table. Quantized keys rank as well as the true keys, at
+two bits, because ranking needs order and not accuracy. Quest-style min/max
+bounds — which this project assumed were the answer — rank at 0.64 and cannot
+prove anything either, overstating true mass by 9.4 orders of magnitude. And
+the one-step staleness a policy is forced into by the protocol costs 0.55%
+relative, so almost none of the advantage is lost to it.
+
+The cost is ~12.5% of KV to carry that signal for the entire context, against
+4 KiB per block per layer for the bounds it replaces.
+
+**What it cannot do is guarantee.** Full attention at step t attends to all t
+keys, so exact output plus eviction means streaming the whole context per
+token. And skipping provably-negligible blocks does not rescue it: every layer
+has a long thin tail, so at a per-head threshold of 1e-4 even a *single* layer
+alone demands 89.3 of 90 blocks. Residency is therefore statistical, which puts
+this on the same footing as every other KV scheme — it has to beat the
+alternatives, or combine with them.
 
 ## Use
 

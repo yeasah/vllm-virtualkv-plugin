@@ -67,149 +67,95 @@ request by hash.
 
 Order: prefill residency first, then the startup check, then the knobs.
 
-## `demand-signal` — scoring exists, and selects the right block
+## `demand-signal` — measured, and the premise was wrong
 
-`bounds.py` holds the per-block key ranges, `quest.py` scores them against the
-previous step's queries, and `policy.py` exposes `quest`. The decision travels
-worker to scheduler through the shared state, one step stale, which is the
-protocol step the design predicted from the moment block order was measured: a
-query only exists inside the forward, and residency must be settled before it.
+**Quest-style min/max bounds are not the demand signal.** Carried here as a
+premise since before any of this was built, and now measured twice against
+alternatives, failing both times. Same budget for every selector, scored on
+the share of true attention mass its pick holds, summed over all 36 layers
+and 32 heads. 23 of 90 blocks, 137 decode steps of a real session,
+Qwen3-8B-AWQ:
 
-**First result.** At a budget of 16 of 129 blocks, with a needle planted in a
-known block, the scored policy *selects* that block and recency does not. It is
-selection that is measured, not the answer: a needle answer is emitted in the
-first token or two, before a query-aware policy has seen a single query, so no
-such policy can affect it. Any harness meant to judge a scored policy on
-answers has to ask its question late.
+| selector | mass captured |
+|---|---|
+| oracle (ceiling, impossible timing) | 0.8756 |
+| 8-bit keys | 0.8756 |
+| 4-bit keys | 0.8756 |
+| 2-bit keys | 0.8755 |
+| oracle, 1 step stale | 0.8708 |
+| **2-bit keys, 1 step stale — deployable** | **0.8708** |
+| min/max bound | 0.6396 |
+| layer-0 queries | 0.3473 |
+| recency (floor) | 0.2743 |
 
-**The aggregation was the whole result**, and the default was wrong on import.
-With `head_agg="mean"` the policy missed the block; with `"max"` it found it,
-same budget, same everything. The mean default came from an earlier measurement
-that mean captures more attention *mass* across a GQA group — a different
-question from retrieval, where the signal sits in a few query heads and
-averaging dilutes it. The layer-wise choice made no difference either way,
-which leaves the all-layer union looking less fatal than feared.
+**A quantized copy of the keys is the signal**, at two bits, ranking as well
+as the true keys do against a ceiling nothing can exceed. Ranking never
+needed accuracy, only order, and 2-bit codes destroy the values while
+preserving the order. About 25% of key bytes with the per-block scales, so
+~12.5% of KV to carry an essentially-oracle demand signal for the whole
+context — against 4 KiB per block per layer for bounds that rank at 0.64.
 
-**The metric to refine against now exists.** `audit.py` recomputes attention
-each step from the true keys -- resident ones from the GPU, evicted ones from
-the host tier, which an eviction method could never do -- and reports the mass
-that sat in blocks the policy did not have. Transfer counters cannot
-distinguish a policy that fetches well from one that fetches constantly;
-`missed_mass`, `fetched_mass` and `evicted_mass` can.
+**Staleness is nearly free, which was the gating unknown.** Residency for
+step N is settled before step N's forward, so the freshest query a policy
+can hold is N-1's. That costs 0.55% relative (0.8756 -> 0.8708) with a
+perfect summary, and the 2-bit summary costs nothing on top of it. The
+autocorrelation the accumulated-standing scorer was built on is now measured
+rather than assumed.
 
-**Ranking on accumulated standing rather than the current step.** A step's
-scores become a distribution before they are accumulated -- their scale rides
-on the query's norm, so mixing raw scores would let one step's magnitude
-outvote another's shape -- and a block's standing decays instead of being
-replaced. A block seen for the first time starts at what it is worth now, so a
-new signal is still actionable immediately; an old one fades rather than
-vanishing, which is the pressure to keep a block that has stopped being
-indicated. GSM8K as 8 turns, budget 12 blocks:
+**Provable skipping is dead, and not because of the union.** Hypothesis: the
+flat union over 1152 head-layer pairs is set by a sensitive few, so weighting
+layers would defuse it. Wrong — at epsilon=1e-4 the *minimum* any single
+layer demands alone is 89.3 of 90 blocks. There are no sparse layers. Every
+layer has a long thin tail, so a per-head threshold that strict is
+unsatisfiable by anyone and no weighting recovers it. Exact output and
+evicting are incompatible anyway: full attention at step t attends to all t
+keys, so bit-exactness requires streaming the whole context per token. The
+target is statistical fidelity, which puts this on the same footing as every
+other KV scheme — it has to beat the alternatives or combine with them.
 
-| decay | missed mass | worst layer | set churn | moved out/in |
-|---|---|---|---|---|
-| 1.0 (per-step) | 0.0097 | 0.427 | 9.65 blk/step | 4747 / 4289 |
-| 0.5 | 0.0098 | 0.386 | 4.45 | 2761 / 2293 |
-| 0.2 | 0.0076 | 0.417 | 2.00 | 1347 / 886 |
-| **0.05** | **0.0070** | **0.297** | **0.66** | 670 / **217** |
-
-Better on every axis at once, which is not what a smoothing knob usually does:
-28% less missed mass, a third off the worst layer, 15x less set movement and a
-twentieth of the fetches. Against recency (missed 0.0121, 460 out, 0 in) the
-scored policy is now 42% better on mass at a transport cost in the same order
-rather than ten times it. The trend had not turned at 0.05, so the optimum may
-be lower and is untested.
-
-**On a model that can do the task, recency wins.** Qwen3-8B-AWQ, GSM8K as 12
-turns, budget 12 of ~90 blocks (13% resident), prefix caching on:
-
-| arm | correct | moved |
+| epsilon | bound needs | oracle needs |
 |---|---|---|
-| no plugin | 11/12 | — |
-| churn | 11/12, bit-identical | 41335 / 41020 |
-| **recency** | **10/12** | 1136 / 0 |
-| quest | 8/12 | 1589 / 441 |
+| 0.1 | 100.0% | 28.5% |
+| 0.01 | 100.0% | 99.1% |
+| 0.001 | 100.0% | 100.0% |
 
-At 13% residency both policies keep nearly all of it, and the scored one is
-two answers *worse*. That is a real negative result for the current scoring,
-and it is also close to the least informative task for the question: GSM8K
-needs the exemplars at the start and the question and reasoning at the end, and
-nothing in between, which is precisely what recency keeps for free. The harness
-was chosen for being mechanism-sensitive and policy-insensitive; it is
-behaving as designed and cannot show a scored policy's advantage.
+**Early layers are the real asymmetry.** Under a globally optimal 25% pick
+the median layer keeps 0.8857 of its mass and the worst keeps 0.5306 —
+nearly half gone — and the worst is essentially always layer 1. Two layers of
+thirty-six is a cheap carve-out, so this is a targeted fix rather than a
+structural problem. (`worst_layer_idx` is a mean of per-step argmins, not a
+mode; the full per-layer distribution is unmeasured.)
 
-What can, and does, is the needle: quest selects the block holding a planted
-answer and recency does not. **The task that would settle it needs both** --
-distant retrieval *and* generations long enough for a query-aware policy to
-act. Neither harness here is that, and building one is the next thing.
-
-**A recency floor under the scored policy is not optional.** Without one quest
-scored 0/12; with half the budget reserved for the newest blocks it scored
-8/12. Attention is heavily recency-weighted and a generation has to see what it
-just wrote; a pure ranking has no floor under that. `recent` now defaults to
-half the budget.
-
-**The measurement bug that produced two rounds of wrong conclusions.** The
-answer extractor matched a trailing period, so `"18."` was scored wrong against
-a gold `"18"`. It was not uniform across arms -- it penalised whichever arm's
-output happened to end with a period -- which is exactly the shape of a
-difference that reads as a result. Under it, recency read 6/12 instead of
-10/12, quest read 0/12 instead of 8/12, and the recency-floor sweep read
-0/0/1/1 instead of 0/0/6/8. Conclusions drawn and then withdrawn: that quest
-was catastrophically worse than recency, and that a recency floor barely
-helped. Both were artifacts. Nothing was wrong with the plugin.
-
-**The earlier comparison, kept because it is what the smoothing fixed.**
-GSM8K as 8 turns, budget 12 blocks:
-
-| policy | missed mass | worst layer | fetched mass | moved | correct |
-|---|---|---|---|---|---|
-| recency | 0.0121 | 0.415 | 0.0000 | 460 out, 0 in | 3/8 |
-| quest | **0.0097** | 0.427 | 0.0118 | 4747 out, **4289 in** | **0/8** |
-
-The scored policy captures about 20% more attention mass and does *worse* on
-the task, at ten times the transport. Three things to take from that, none of
-them "quest is bad":
-
-- **The proxy moved the right way and the outcome moved the wrong way.** Mass
-  captured has always been a proxy for quality rather than a measurement of it;
-  this is the first time the two have been observed disagreeing here, and it is
-  the reason the end-to-end harness exists.
-- **n is 8, on a model that scores 3/8 at full context.** The accuracy column
-  is not evidence of much. The mass column, over 911 audited steps, is.
-- **Nothing bounds the fetching**, and it shows: 4289 restores over 911 steps
-  is ~4.7 blocks per step, which at the measured transport cost is real latency
-  spent for a proxy improvement of 0.0024. The fetch ceiling stops being a
-  future refinement here and becomes the next thing to build.
+**Layer-0 queries are computable before any forward** — embed, norm, q_proj,
+no attention — and rank at 0.3473. Not competitive as a general signal, but
+the prefill cold start is the one place where nothing else can exist, and
+there the only bar is recency.
 
 What is not yet known:
 
-1. **Whether it beats recency on anything but a planted needle.** One block,
-   one prompt, one model. Selection accuracy against real attention mass is
-   unmeasured.
-2. **What the bounds cost in practice.** Held in fp32 at
-   `num_kv_heads * head_size * 2` per block per layer, which is not a
-   deployable format, and the memory comes out of the same budget the blocks
-   do.
-3. **Whether one step of staleness is enough** at real generation lengths.
-   `ranked` counts how often a ranking was available and it is low on short
-   runs.
-4. **A fetch ceiling**, now measured as the pressing gap rather than a
-   theoretical one -- see the churn figures above.
-5. ~~Whether the instability is the problem.~~ **Measured, and it was.**
+1. **Whether mass capture translates into output quality.** It is a proxy,
+   and this repo has already seen a proxy improve while the outcome got
+   worse. `tools/session_turns.py` is the instrument; the question is whether
+   0.87 capture beats recency's 0.5937 token agreement by a matching margin.
+2. **Whether it beats eviction at equal residency**, which is the claim the
+   design rests on: paging can do everything eviction does and then fetch
+   back what it got wrong. Untested against H2O/SnapKV-style baselines.
+3. **Longer contexts.** All of this is ~1600 keys. Sparsity may improve with
+   length, which is where a pager earns its keep.
+4. **A fetch ceiling**, still unexpressed: the transport measurement says the
+   budget that matters is absolute, ~543 tokens per decode step at 5% added
+   latency, which neither a block count nor a percentage says.
 
-
-
-`recency` never fetches; its window only slides forward. At 12% residency an
-oracle reproduces the full-context answer token for token and recency loses it
-(README, "Status"), so the mechanism is not the limit.
-
-A policy can only fetch if something resident tells it a non-resident block is
-wanted. Quest-style per-block key bounds are the shape: min/max per channel,
-kept when the block leaves, giving an upper bound on that block's attention for
-the current query without its keys. Not free — about 4 KiB per block per layer
-in fp16 against a 32 KiB block, out of the same budget — and worth measuring at
-the intended geometry before committing to it.
+**The instrumentation was wrong twice in one session**, in ways that changed
+conclusions, while the plugin passed every exact check it was given:
+`audit.py` never applied the attention scale (softmaxing logits ~11x too
+large, off a far sharper distribution than the model's), and the working-set
+softmax excluded the partial tail block, handing its mass to older blocks —
+that one alone moved the oracle from 99.5% to 26.4% at epsilon=0.1. Every
+`missed_mass` figure recorded before those fixes is off; ordering may
+survive, magnitudes should not be quoted. **Before more decisions rest on
+that path it needs a test pinning its reconstructed attention against the
+model's own attention output.**
 
 ## `auto-context` — an upstream idea, noted here so it is not lost
 

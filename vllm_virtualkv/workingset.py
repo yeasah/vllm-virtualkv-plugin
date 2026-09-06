@@ -80,7 +80,8 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
                  queries: Sequence[torch.Tensor], block_size: int,
                  head_size: int, scale: float,
                  head_size_v: int | None = None, tail: int = 0,
-                 share: float = 0.25) -> dict | None:
+                 share: float = 0.25,
+                 stale: Sequence[torch.Tensor] | None = None) -> dict | None:
     """Which resident summary picks the blocks that actually carry the mass.
 
     Every selector gets the same budget and is scored on the same thing: the
@@ -102,6 +103,8 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
     true_sum = torch.zeros(n_full, device=device)
     bound_max = torch.full((n_full,), -float("inf"), device=device)
     est_sum = {b: torch.zeros(n_full, device=device) for b in BITS}
+    stale_true = torch.zeros(n_full, device=device)
+    stale_q2 = torch.zeros(n_full, device=device)
     #: Per-layer, kept rather than folded in. Aggregating over layers is what
     #: hides whether a flat union is being driven by a sensitive few.
     per_layer: list[torch.Tensor] = []
@@ -124,6 +127,14 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
             return w[..., :n_keys].reshape(
                 *w.shape[:2], n_full, block_size).sum(-1)
 
+        if stale:
+            sq = stale[layer].float().reshape(kv_heads, -1, q.shape[-1])
+            keep_q, q = q, sq
+            stale_true += mass_of(layer_keys).sum(dim=(0, 1))
+            stale_q2 += mass_of(
+                _quantize(layer_keys.reshape(kv_heads, n_full, block_size, -1),
+                          2).reshape(kv_heads, n_keys, -1)).sum(dim=(0, 1))
+            q = keep_q
         layer_mass = mass_of(layer_keys).sum(dim=(0, 1))
         per_layer.append(layer_mass)
         true_sum += layer_mass
@@ -155,6 +166,9 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
            "layer0": captured(per_layer[0])}
     for bits in BITS:
         out[f"q{bits}"] = captured(est_sum[bits])
+    if stale:
+        out["oracle_stale"] = captured(stale_true)
+        out["q2_stale"] = captured(stale_q2)
 
     # The union question in mass terms: the globally-best pick still has to
     # serve every layer, and the worst-served layer is what a flat union is
