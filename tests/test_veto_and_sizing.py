@@ -186,9 +186,28 @@ def test_the_tier_is_sized_from_the_resolved_budget_not_the_written_one():
     cfg.resolve(engine)                      # what the spec hook does later
     assert cfg.budget == 128
 
+    # Faithful enough for the group resolver: one paged group, one layer.
+    # A stub without groups is now refused rather than silently paging
+    # whatever tensor happened to be first, which is the point of
+    # `groups.resolve`.
+    class FakeSpec:
+        budget_blocks = 128
+        sink_blocks = 2
+        policy_name = "recency"
+        head_size = 2
+        head_size_v = 2
+
+    class FakeGroup:
+        layer_names = ["model.layers.0.self_attn.attn"]
+        kv_cache_spec = FakeSpec()
+
+    class FakeConfig:
+        kv_cache_groups = [FakeGroup()]
+
     class FakeRunner:
         vllm_config = engine
         kv_caches = [torch.zeros((4, 1, 1, 2))]
+        kv_cache_config = FakeConfig()
 
     pager._attach(FakeRunner())
     assert pager.budget == 128

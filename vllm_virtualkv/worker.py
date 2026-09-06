@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from . import state as pager_state
+from .groups import PagedGroup, resolve
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
 from .policy import choose
@@ -128,6 +129,9 @@ class WorkerPager:
         #: per-step equal-VRAM comparison of dropping vs degrading
         self.tier_rows: list[dict] = []
         self._last_view: dict = {}
+        #: Which KV cache group is ours. A hybrid has more than one and only
+        #: one is paged; resolved at attach and asserted, never assumed.
+        self.group: PagedGroup | None = None
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -206,7 +210,7 @@ class WorkerPager:
         if not self.state.steps:
             return
         tables = runner.block_tables
-        table = tables.block_tables[0]
+        table = tables.block_tables[self.group.index if self.group else 0]
         for b in range(batch.num_reqs):
             if int(batch.num_scheduled_tokens[b]) != 1:
                 continue
@@ -245,14 +249,15 @@ class WorkerPager:
             if slots is None:
                 slots = max(1, required_host_slots(budget, runner.vllm_config))
             self.host_slots = slots
-            self.tier = HostTier(runner.kv_caches, slots)
+            self.group = resolve(runner)
+            self.tier = HostTier(self.group.caches(runner.kv_caches), slots)
             self.guard = ResidencyGuard(self.scheduler)
             if self.config is not None and (self.config.policy == "quest"
                                             or self.config.policy
                                             == "massoracle"
                                             or self.config.audit
                                             or self.config.working_set):
-                spec = runner.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+                spec = self.group.spec
                 self.scorer = QuestScorer(
                     head_size=spec.head_size, head_size_v=spec.head_size_v,
                     head_agg=self.config.head_agg,
@@ -267,6 +272,8 @@ class WorkerPager:
         block_tables, slot_mappings = prepared
         if not block_tables:
             return
+        if self.group is None:
+            return
         self._plan = {}
         if self.capture is not None:
             # This forward's queries have not happened yet; what is held is the
@@ -276,10 +283,14 @@ class WorkerPager:
                                             or self.config.working_set):
                 self._audit_previous(runner)
         self._release_finished()
-        table = block_tables[0]
-        slots = slot_mappings[0] if slot_mappings is not None else None
-        block_size = runner.block_tables.kernel_block_sizes[0]
-        caches = runner.kv_caches
+        g = self.group.index
+        if g >= len(block_tables):
+            raise RuntimeError(
+                f"paged group {g} but only {len(block_tables)} block tables")
+        table = block_tables[g]
+        slots = slot_mappings[g] if slot_mappings is not None else None
+        block_size = runner.block_tables.kernel_block_sizes[g]
+        caches = self.group.caches(runner.kv_caches)
         seq_lens = batch.seq_lens
         intended = {}
 
@@ -476,7 +487,8 @@ class WorkerPager:
             queries = self.capture.for_row(saved["row_index"])
             if self.config is not None and self.config.working_set:
                 sm = summary_step(
-                    runner.kv_caches, self.tier, req_id, saved["row"],
+                    self.group.caches(runner.kv_caches), self.tier, req_id,
+                    saved["row"],
                     saved["resident"], saved["n_full"], queries,
                     saved["block_size"], self._spec.head_size,
                     self.capture.scale, self._spec.head_size_v,
@@ -486,14 +498,16 @@ class WorkerPager:
                 if sm is not None:
                     self.summary_rows.append(sm)
                 ts = tier_step(
-                    runner.kv_caches, req_id, saved["row"], saved["n_full"],
+                    self.group.caches(runner.kv_caches), req_id, saved["row"],
+                    saved["n_full"],
                     queries, saved["block_size"], self._spec.head_size,
                     self.capture.scale, self._spec.head_size_v,
                     tail=saved["tail"])
                 if ts is not None:
                     self.tier_rows.append(ts)
                 ws = working_set_step(
-                    runner.kv_caches, self.tier, req_id, saved["row"],
+                    self.group.caches(runner.kv_caches), self.tier, req_id,
+                    saved["row"],
                     saved["resident"], saved["n_full"], queries,
                     saved["block_size"], self._spec.head_size,
                     self.capture.scale, self._spec.head_size_v,
@@ -503,7 +517,8 @@ class WorkerPager:
             if self.config is not None and not self.config.audit:
                 continue
             row = audit_step(
-                runner.kv_caches, self.tier, req_id, saved["row"],
+                self.group.caches(runner.kv_caches), self.tier, req_id,
+                    saved["row"],
                 saved["resident"], saved["n_full"], queries,
                 saved["block_size"], self._spec.head_size,
                 self._spec.head_size_v, saved["restored"], saved["evicted"],
