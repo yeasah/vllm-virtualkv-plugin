@@ -96,6 +96,18 @@ def main() -> int:
             continue
         print(f"  {e:>8s}  {b:7.1f} ({b / n:5.1%})  {o:7.1f} ({o / n:5.1%})  "
               f"{b - o:6.1f}  {ws.get(f'max_bound@{e}', 0):7.0f}")
+    sm = made[0].summary().get("summaries") if made else None
+    if sm:
+        print(f"\n  resident summaries, budget {sm['budget']:.0f} of "
+              f"{sm['n_full']:.0f} blocks -- share of true attention mass "
+              f"their pick holds")
+        order = [("oracle", "oracle (ceiling)"), ("q8", "8-bit keys"),
+                 ("q4", "4-bit keys"), ("q2", "2-bit keys"),
+                 ("bound", "min/max bound"), ("recency", "recency (floor)")]
+        for k, label in order:
+            if k in sm:
+                print(f"    {label:20s} {sm[k]:.4f}")
+
     bad = sum(ws.get(f"unsound@{e}", 0)
               for e in ("0.1", "0.01", "0.001", "0.0001"))
     print(f"\n  {'bound stayed sound at every step' if bad == 0 else f'BOUND UNSOUND on {bad} block-steps -- it is not an upper bound'}")

@@ -54,6 +54,102 @@ from .bounds import block_keys
 EPSILONS = (1e-1, 1e-2, 1e-3, 1e-4)
 
 
+#: Bit widths for the quantized-key summary. The question is not whether a
+#: quantized key is accurate -- it is whether it *ranks* blocks the way the
+#: true keys do, which is a far weaker requirement and the only one a
+#: residency decision needs.
+BITS = (8, 4, 2)
+
+
+def _quantize(x: torch.Tensor, bits: int) -> torch.Tensor:
+    """Per-block, per-channel asymmetric quantization, dequantized in place.
+
+    The same footprint story as the min/max bound -- two values per channel
+    per block -- plus `bits` per key per channel for the codes. It buys an
+    estimate of where each key actually sits instead of the corner of the box
+    that contains them all.
+    """
+    lo = x.amin(dim=2, keepdim=True)
+    hi = x.amax(dim=2, keepdim=True)
+    step = (hi - lo).clamp(min=1e-9) / (2 ** bits - 1)
+    return lo + torch.round((x - lo) / step) * step
+
+
+def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
+                 row: Sequence[int], resident, n_full: int,
+                 queries: Sequence[torch.Tensor], block_size: int,
+                 head_size: int, scale: float,
+                 head_size_v: int | None = None, tail: int = 0,
+                 share: float = 0.25) -> dict | None:
+    """Which resident summary picks the blocks that actually carry the mass.
+
+    Every selector gets the same budget and is scored on the same thing: the
+    share of true attention mass its chosen blocks hold, summed over every
+    layer and head. `oracle` is the ceiling -- it ranks on the true mass
+    itself, so no summary can beat it and the gap to it is what a summary
+    costs. `recency` is the floor, because it is what shipping today already
+    does and a summary that cannot beat it is not worth its memory.
+    """
+    if not queries or n_full <= 0 or not scale:
+        return None
+    device = caches[0].device
+    keys = _keys_for(caches, tier, req_id, row, n_full, head_size,
+                     head_size_v, set(resident), device)
+    if keys is None:
+        return None
+
+    n_keys = n_full * block_size
+    true_sum = torch.zeros(n_full, device=device)
+    bound_max = torch.full((n_full,), -float("inf"), device=device)
+    est_sum = {b: torch.zeros(n_full, device=device) for b in BITS}
+
+    for layer, (q, layer_keys) in enumerate(zip(queries, keys)):
+        kv_heads = layer_keys.shape[0]
+        if layer_keys.shape[1] < n_keys:
+            return None
+        layer_keys = layer_keys[:, :n_keys, :]
+        q = q.float().reshape(kv_heads, -1, q.shape[-1])
+        edge = None
+        if tail > 0 and len(row) > n_full:
+            edge = block_keys(caches[layer], row[n_full], head_size,
+                              head_size_v)[:, :tail, :].float()
+
+        def mass_of(k: torch.Tensor) -> torch.Tensor:
+            full = k if edge is None else torch.cat([k, edge], dim=1)
+            w = torch.softmax(torch.einsum("kgd,knd->kgn", q, full) * scale,
+                              dim=-1)
+            return w[..., :n_keys].reshape(
+                *w.shape[:2], n_full, block_size).sum(-1)
+
+        true_sum += mass_of(layer_keys).sum(dim=(0, 1))
+        blocked = layer_keys.reshape(kv_heads, n_full, block_size, -1)
+        for bits in BITS:
+            est_sum[bits] += mass_of(
+                _quantize(blocked, bits).reshape(kv_heads, n_keys, -1)
+            ).sum(dim=(0, 1))
+        lo = blocked.min(dim=2).values.unsqueeze(1)
+        hi = blocked.max(dim=2).values.unsqueeze(1)
+        upper = torch.maximum(q.unsqueeze(2) * lo,
+                              q.unsqueeze(2) * hi).sum(-1)
+        bound_max = torch.maximum(bound_max, upper.amax(dim=(0, 1)))
+
+    budget = max(1, int(round(share * n_full)))
+    total = float(true_sum.sum()) or 1.0
+
+    def captured(rank: torch.Tensor) -> float:
+        pick = torch.topk(rank, min(budget, n_full)).indices
+        return float(true_sum[pick].sum()) / total
+
+    recency = torch.arange(n_full, device=device, dtype=torch.float32)
+    out = {"n_full": n_full, "budget": budget,
+           "oracle": captured(true_sum),
+           "bound": captured(bound_max),
+           "recency": captured(recency)}
+    for bits in BITS:
+        out[f"q{bits}"] = captured(est_sum[bits])
+    return out
+
+
 def working_set_step(caches: Sequence[torch.Tensor], tier, req_id: str,
                      row: Sequence[int], resident, n_full: int,
                      queries: Sequence[torch.Tensor], block_size: int,

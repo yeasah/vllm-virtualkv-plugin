@@ -45,7 +45,7 @@ from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
 from .audit import audit_step
-from .workingset import working_set_step
+from .workingset import summary_step, working_set_step
 from .quest import QueryCapture, QuestScorer
 
 if TYPE_CHECKING:
@@ -121,6 +121,8 @@ class WorkerPager:
         self.audit_rows: list[dict] = []
         #: per-step working-set measurement, when config.working_set is on
         self.ws_rows: list[dict] = []
+        #: per-step comparison of resident summaries, alongside working_set
+        self.summary_rows: list[dict] = []
         self._last_view: dict = {}
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
@@ -461,6 +463,14 @@ class WorkerPager:
         for req_id, saved in list(self._last_view.items()):
             queries = self.capture.for_row(saved["row_index"])
             if self.config is not None and self.config.working_set:
+                sm = summary_step(
+                    runner.kv_caches, self.tier, req_id, saved["row"],
+                    saved["resident"], saved["n_full"], queries,
+                    saved["block_size"], self._spec.head_size,
+                    self.capture.scale, self._spec.head_size_v,
+                    tail=saved["tail"])
+                if sm is not None:
+                    self.summary_rows.append(sm)
                 ws = working_set_step(
                     runner.kv_caches, self.tier, req_id, saved["row"],
                     saved["resident"], saved["n_full"], queries,
@@ -522,6 +532,14 @@ class WorkerPager:
                 f"{req_id}: block ids {bad_ids[:4]} are outside a pool of "
                 f"{num_blocks} blocks")
 
+    def _summary_summary(self) -> dict[str, Any] | None:
+        if not self.summary_rows:
+            return None
+        n = len(self.summary_rows)
+        keys = [k for k in self.summary_rows[0]]
+        return {"steps": n,
+                **{k: sum(r[k] for r in self.summary_rows) / n for k in keys}}
+
     def _ws_summary(self) -> dict[str, Any] | None:
         """Averaged over steps, plus the worst step, since a stall is per step."""
         if not self.ws_rows:
@@ -565,6 +583,7 @@ class WorkerPager:
                "last_selection": list(self.last_selection),
                "audit": self._audit_summary(),
                "working_set": self._ws_summary(),
+               "summaries": self._summary_summary(),
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()
