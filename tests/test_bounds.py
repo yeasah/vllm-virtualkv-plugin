@@ -123,3 +123,41 @@ def test_bounds_are_taken_in_fp32_even_from_a_low_precision_cache():
     keys = block_keys(caches[0], 0, DIM).float()
     assert torch.equal(bounds[0, :, 0, :], keys.amin(dim=1))
     assert torch.equal(bounds[0, :, 1, :], keys.amax(dim=1))
+
+
+def test_churn_windows_stay_disjoint_while_the_context_grows():
+    """The failure that produced a divergence only after a block boundary.
+
+    A window computed modulo the number of full blocks is disjoint step to step
+    only while that number holds still. It does not: the request fills another
+    block, the modulus changes, and the window can land back on what it just
+    evicted -- which is then freed with nothing asking for it back. Growing
+    `n_full` across the steps is the whole point of this test.
+    """
+    from vllm_virtualkv.policy import Churn
+
+    churn = Churn(budget=4)
+    previous = None
+    for step, n_full in enumerate(range(60, 80)):     # a block fills each step
+        window = churn.window(n_full, step)
+        assert window, f"step {step}: nothing evicted, nothing exercised"
+        if previous is not None:
+            assert not (window & previous), (
+                f"step {step} re-chose {sorted(window & previous)} while "
+                f"n_full grew to {n_full}; those blocks were freed on the "
+                f"step before and nothing will ask for them back"
+            )
+        assert window <= set(range(n_full))
+        previous = window
+
+
+def test_churn_evicts_something_and_keeps_the_rest():
+    from vllm_virtualkv.policy import Churn
+
+    churn = Churn(budget=4)
+    n_full = 63
+    for step in range(8):
+        resident = set(churn.resident(n_full, step))
+        window = churn.window(n_full, step)
+        assert resident | window == set(range(n_full))
+        assert not (resident & window)

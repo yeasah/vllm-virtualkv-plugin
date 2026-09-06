@@ -1,4 +1,16 @@
-"""The plugin, evicting nothing, must be indistinguishable from not having it.
+"""Two arms that must be indistinguishable from not having the plugin.
+
+`full` evicts nothing, so it checks that being installed changes nothing. That
+is necessary and weak: it cannot catch a bug that only appears once eviction
+happens, which is most of them.
+
+`churn` is the strong one. It cycles blocks out and asks for every one of them
+straight back, so each block is copied to the host, freed, reallocated
+somewhere else and copied back -- while the model never loses sight of
+anything. It saves no memory and is not trying to. It is the only arrangement
+in which the manager's own evict-and-restore path can be held against an exact
+reference, because every policy that actually drops context changes the output
+on purpose and has nothing to be compared with.
 
 This is the test that keeps a mechanism bug from being read later as a quality
 result. Everything else about a paged run changes the output on purpose, so
@@ -47,6 +59,7 @@ mgrs = (llm.llm_engine.engine_core.engine_core.scheduler
 res = {"ids": [int(t) for t in out.outputs[0].token_ids],
        "manager": type(mgrs[0]).__name__,
        "freed": int(getattr(mgrs[0], "blocks_freed", 0)),
+       "restored": int(getattr(mgrs[0], "blocks_restored", 0)),
        "logprobs": [
            {str(t): round(lp.logprob, 6) for t, lp in step.items()}
            for step in (out.outputs[0].logprobs or [])]}
@@ -66,6 +79,27 @@ def run(env_extra, tmp, tag):
     assert proc.returncode == 0, proc.stderr[-3000:]
     with open(out) as f:
         return json.load(f)
+
+
+def test_churn_round_trips_every_block_and_changes_nothing():
+    """The whole data path, every step, against a bit-exact reference."""
+    with tempfile.TemporaryDirectory() as tmp:
+        off = run({"VLLM_VIRTUALKV": "0"}, tmp, "off")
+        churn = run({"VLLM_VIRTUALKV": "1", "VLLM_VIRTUALKV_BUDGET": "4",
+                     "VLLM_VIRTUALKV_POLICY": "churn",
+                     "VLLM_VIRTUALKV_SHOW_PENDING": "1"}, tmp, "churn")
+
+    assert churn["freed"] > 0, "nothing was evicted, so nothing was exercised"
+    assert churn["restored"] > 0, (
+        "nothing was restored: the arm that is supposed to prove the restore "
+        "path did not use it")
+    assert churn["freed"] >= churn["restored"] > 0
+    assert churn["ids"] == off["ids"], (
+        "cycling blocks through the host tier changed the tokens, so a block "
+        "did not come back as it left")
+    assert churn["logprobs"] == off["logprobs"], (
+        "the tokens survived but the distributions did not -- the round trip "
+        "is lossy in a way greedy decoding happens to hide")
 
 
 def test_zero_budget_is_indistinguishable_from_no_plugin():

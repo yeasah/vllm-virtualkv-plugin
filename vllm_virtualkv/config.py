@@ -23,12 +23,20 @@ class Config:
     PREFIX = "VLLM_VIRTUALKV_"
 
     def __init__(self, budget=0, sink=2, policy="recency", host_slots=None,
-                 verify=True):
+                 verify=True, show_pending=False):
         self.budget = budget
         self.sink = sink
         self.policy = policy
         self.host_slots = host_slots
         self.verify = verify
+        #: Show the kernel blocks that are chosen for eviction but not yet
+        #: freed. They are still allocated and still valid for one more step,
+        #: so reading them is free quality -- but it makes the effective
+        #: resident set the budget *plus* whatever is in flight, which muddies
+        #: a measurement of what a budget buys. Off by default so a quality
+        #: number means what it says; on for the churn policy, which depends
+        #: on it to keep the context whole.
+        self.show_pending = show_pending
 
     @classmethod
     def from_env(cls, env=None) -> "Config":
@@ -50,11 +58,18 @@ class Config:
             host_slots=get("HOST_SLOTS", None,
                            lambda x: None if x == "auto" else int(x)),
             verify=get("VERIFY", True, lambda x: x not in ("0", "false", "no")),
+            show_pending=get("SHOW_PENDING", False,
+                             lambda x: x not in ("0", "false", "no")),
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
+        if self.policy == "churn" and not self.show_pending:
+            raise ValueError(
+                "policy 'churn' needs show_pending: it depends on reading a "
+                "block during the step it was chosen for eviction, and without "
+                "that it drops context instead of cycling it")
         if self.policy not in POLICIES:
             raise ValueError(
                 f"unknown policy {self.policy!r}; have {sorted(POLICIES)}")
@@ -75,4 +90,4 @@ class Config:
         slots = "auto" if self.host_slots is None else self.host_slots
         return (f"Config(budget={self.budget}, sink={self.sink}, "
                 f"policy={self.policy!r}, host_slots={slots}, "
-                f"verify={self.verify})")
+                f"verify={self.verify}, show_pending={self.show_pending})")

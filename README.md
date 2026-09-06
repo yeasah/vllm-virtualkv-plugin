@@ -61,6 +61,7 @@ vllm serve <model>
 | `VLLM_VIRTUALKV` | off | must be set, or the plugin does nothing at all |
 | `VLLM_VIRTUALKV_BUDGET` | `0` | resident full blocks per request; `0` evicts nothing |
 | `VLLM_VIRTUALKV_POLICY` | `recency` | which blocks to keep |
+| `VLLM_VIRTUALKV_SHOW_PENDING` | off | read blocks chosen for eviction but not yet freed |
 | `VLLM_VIRTUALKV_SINK` | `2` | leading blocks always kept |
 | `VLLM_VIRTUALKV_HOST_SLOTS` | `auto` | host tier size in blocks; derived from the engine unless set |
 | `VLLM_VIRTUALKV_VERIFY` | on | run the residency guard |
@@ -112,9 +113,17 @@ result that does not say which were active is not evidence:
   nothing but the step being executed and so run in a deployment; the fourth
   needs the scheduler and therefore an in-process engine.
   `tools/guard_selftest.py` injects each fault and shows it caught.
-- **the control arm** (`tests/test_control_arm.py`) — the plugin evicting
-  nothing must be bit-identical to not having it. Necessary and not sufficient:
-  it cannot catch a bug that only appears once eviction happens.
+- **two control arms** (`tests/test_control_arm.py`). `full` evicts nothing and
+  must be bit-identical to not having the plugin — necessary, and weak, since
+  it cannot catch anything that only appears once eviction happens. **`churn`
+  is the strong one**: it cycles blocks out and asks every one of them straight
+  back, so each block is copied to the host, freed, reallocated elsewhere and
+  copied back, while the model never loses sight of anything. It saves no
+  memory and is not trying to. It is the only arrangement in which the
+  manager's own evict-and-restore path can be held against an exact reference,
+  because every policy that actually drops context changes the output on
+  purpose and has nothing to be compared with. Both are bit-identical to no
+  plugin, in tokens *and* logprobs.
 - **transfer counters** — `copied_out`, `copied_in`, `missing_host_copy`,
   `evictions_refused`. The
   guard checks that what happens is *legal*, and a plugin that silently does

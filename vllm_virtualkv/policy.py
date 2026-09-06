@@ -105,6 +105,72 @@ class Stress:
         return sorted(x for x in keep if 0 <= x < n_full)
 
 
+class Churn:
+    """Cycles blocks out and asks for every one of them straight back.
+
+    Saves no memory, and is not trying to: it exists so the machinery can be
+    tested against the strongest reference there is. Every step it evicts a
+    rotating window and requests the whole of the previous window back, so
+    each block makes a full round trip -- copied to the host, freed,
+    reallocated somewhere else, copied back -- while the model never loses
+    sight of anything. **The output must therefore be bit-identical to running
+    without the plugin**, which no policy that actually drops context can be
+    compared against.
+
+    That is the end-to-end version of a proof this project otherwise only has
+    in pieces: the host tier round trip is bit-exact in isolation, and a
+    hand-driven relocation is bit-exact through the model, but nothing until
+    now exercised the *manager's own* evict-and-restore path against an exact
+    reference.
+
+    `budget` is read as the number of blocks to cycle per step, not as a
+    resident count -- the one policy here where that argument means something
+    different, because "how much do you keep" is not the question it answers.
+    Requires `show_pending`, since a block is only still readable during the
+    step it was chosen in.
+
+    **Consecutive windows must not overlap**, which is the whole contract and
+    is easy to get wrong twice. A block chosen again on the step after it was
+    chosen has already been freed, so it is neither resident nor pending, and
+    it quietly stays away instead of cycling -- context lost, with every
+    counter still reading clean.
+
+    The first attempt advanced a sliding window by one block, which overlaps
+    obviously. The second advanced it by its own width, computing the offset
+    modulo the number of full blocks -- which is disjoint only while that
+    number holds still, and it does not: the moment the request fills another
+    block the modulus changes and the window can land back on what it just
+    evicted. That failure showed up as a divergence appearing at exactly the
+    step the context crossed a block boundary.
+
+    So the window is not a moving offset at all. Blocks are grouped into runs
+    of `width` and a run is evicted when its index falls in the step's residue
+    class mod `PHASES`. Which blocks those are depends only on the block index
+    and the step, never on how many blocks exist, so growing the context cannot
+    make two consecutive steps overlap.
+    """
+
+    name = "churn"
+    #: How many steps before a block can be chosen again. Two would suffice for
+    #: disjointness; four keeps each step's traffic to about a quarter of the
+    #: context.
+    PHASES = 4
+
+    def __init__(self, budget: int, sink: int = 0) -> None:
+        self.width = max(1, budget)
+        self.sink = sink
+
+    def window(self, n_full: int, num_computed: int) -> set[int]:
+        if n_full <= self.sink:
+            return set()
+        phase = num_computed % self.PHASES
+        return {i for i in range(self.sink, n_full)
+                if ((i - self.sink) // self.width) % self.PHASES == phase}
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        return sorted(set(range(n_full)) - self.window(n_full, num_computed))
+
+
 class Oracle:
     """Recency, plus a set of blocks the caller says matter. The ceiling.
 
@@ -184,5 +250,5 @@ class Full:
 
 
 POLICIES: dict[str, type[Policy]] = {
-    p.name: p for p in (Recency, Stress, Oracle, OracleLate, Full)
+    p.name: p for p in (Recency, Stress, Churn, Oracle, OracleLate, Full)
 }

@@ -69,7 +69,8 @@ class WorkerPager:
 
     def __init__(self, host_slots: int | None = None,
                  scheduler: Scheduler | None = None, verify: bool = True,
-                 budget: int = 0) -> None:
+                 budget: int = 0, show_pending: bool = False) -> None:
+        self.show_pending = show_pending
         #: None means derive it from the engine at attach time, which is the
         #: first moment the model length, block size and concurrency are all
         #: known here.
@@ -312,7 +313,12 @@ class WorkerPager:
         """
         mgr_tail = step.num_computed // block_size
         tail = computed // block_size
-        keep = [i for i in step.resident if i < mgr_tail]
+        chosen = step.resident
+        if self.show_pending and step.evicting:
+            # Still allocated, still valid, and freed only on the next pass.
+            # Hiding them wastes a step of context for nothing.
+            chosen = sorted(set(chosen) | {i for i, _ in step.evicting})
+        keep = [i for i in chosen if i < mgr_tail]
         keep += [i for i in range(mgr_tail, tail + 1) if i < row_len]
         return keep
 
