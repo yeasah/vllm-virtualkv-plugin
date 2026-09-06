@@ -48,7 +48,31 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gsm8k_turns import ARMS, ENV, render  # noqa: E402
+from gsm8k_turns import ENV as _GSM_ENV, render  # noqa: E402
+
+#: Its own arms, not gsm8k's. `massoracle` is the ceiling this harness
+#: exists to test -- residency ranked on measured attention mass -- and
+#: `churn` is dropped because its bit-exactness is already established and
+#: it costs a full copy-out/copy-in of the context every step.
+ARMS = ("off", "truncate", "recency", "quest", "massoracle")
+ENV = {**_GSM_ENV,
+       "truncate": {"VLLM_VIRTUALKV": "0"},
+       "massoracle": {"VLLM_VIRTUALKV": "1",
+                      "VLLM_VIRTUALKV_POLICY": "massoracle"}}
+
+#: `truncate` is the control the other arms were missing. Recency is very
+#: nearly "use a shorter context", and a comparison in which every arm is
+#: scored only against the *full* baseline cannot tell a policy that retained
+#: distant context from one whose damage merely happened to be in
+#: distribution -- a contiguous recent window is a shorter conversation, which
+#: the model has seen a trillion of, while a mass-ranked set is a context full
+#: of holes at positions that correspond to nothing it was trained on.
+#:
+#: So this arm runs no plugin at all and simply cuts the prompt to sinks plus
+#: the most recent tokens, which is genuinely the shorter context rather than
+#: an approximation of it. It is the floor the whole idea has to clear: a
+#: policy that cannot beat throwing the context away has not shown that
+#: keeping it was worth anything.
 
 #: UltraChat's SFT test split: multi-turn by construction, English, ungated,
 #: and long enough per turn that a budget binds. The rows API hands over a
@@ -263,6 +287,16 @@ def one_arm(args) -> None:
             continue
         messages.append({"role": "user", "content": msg["content"]})
         prompt = render(tok, messages, args.thinking)
+        cut = None
+        if args.truncate_tokens:
+            ids = tok(prompt).input_ids
+            if len(ids) > args.truncate_tokens:
+                #: Sinks plus the recent window, which is what `recency`
+                #: keeps -- so the two differ in whether the surviving
+                #: tokens keep their original positions, not in which
+                #: tokens survive.
+                keep = args.truncate_tokens - args.truncate_sinks
+                cut = list(ids[:args.truncate_sinks]) + list(ids[-keep:])
         budget = args.max_tokens
         if tap is not None:
             tap.load(None)
@@ -274,7 +308,8 @@ def one_arm(args) -> None:
         if len(tok(prompt).input_ids) + budget > args.max_len:
             break
         params = SamplingParams(temperature=0.0, max_tokens=budget, logprobs=5)
-        out = llm.generate([prompt], params)[0]
+        out = llm.generate(
+            [{"prompt_token_ids": cut} if cut else prompt], params)[0]
         got = out.outputs[0]
         ids = [int(x) for x in got.token_ids]
         #: The logprob and *rank* of the token actually emitted. Under
@@ -405,7 +440,8 @@ def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
     return out
 
 
-def report(arms: dict, args: argparse.Namespace) -> None:
+def report(arms: dict, args: argparse.Namespace,
+           running: tuple = ARMS) -> None:
     ref = arms["off"]["turns"]
     with open(args.transcript) as f:
         src = json.load(f)
@@ -413,7 +449,7 @@ def report(arms: dict, args: argparse.Namespace) -> None:
           f"({src['conversations']} conversations), budget {args.budget}")
     print(f"  context grows to {ref[-1]['prompt_chars']} chars, "
           f"{sum(len(t['ids']) for t in ref)} tokens generated\n")
-    for name in ARMS:
+    for name in running:
         turns = arms[name]["turns"]
         if args.force:
             st = forced_stats(ref, turns)
@@ -453,12 +489,19 @@ def report(arms: dict, args: argparse.Namespace) -> None:
                   f"{p.get('missing_host_copy', 0)}  refused "
                   f"{p.get('evictions_refused', 0)}"
                   f"   guard {g.get('violations', 0)}/{g.get('steps', 0)}")
-    if arms["churn"]["turns"] and all(
-            a["ids"] == b["ids"] and a["lp"] == b["lp"]
-            for a, b in zip(ref, arms["churn"]["turns"])):
-        print("\n  churn is bit-identical on a real session")
-    else:
-        print("\n  CHURN DIVERGED -- the machinery lost something")
+    if "churn" in arms:
+        ok = all(a["ids"] == b["ids"] and a["lp"] == b["lp"]
+                 for a, b in zip(ref, arms["churn"]["turns"]))
+        print(f"\n  {'churn is bit-identical on a real session' if ok
+                     else 'CHURN DIVERGED -- the machinery lost something'}")
+    # A budget that never binds measures nothing, and an arm that evicted
+    # nothing looks identical to a perfect one. Say so rather than printing
+    # a table of 1.0000.
+    idle = [n for n in running if n not in ("off", "truncate")
+            and arms[n].get("pager", {}).get("copied_out", 0) == 0]
+    if idle:
+        print(f"\n  [!] {', '.join(idle)} evicted nothing -- the budget did "
+              f"not bind, so this run compares nothing")
 
 
 def main() -> int:
@@ -477,13 +520,21 @@ def main() -> int:
     ap.add_argument("--max-len", type=int, default=16384)
     ap.add_argument("--max-tokens", type=int, default=0)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--block-size", type=int, default=16,
+                    help="only to convert a block budget into a token cut")
     ap.add_argument("--thinking", action="store_true")
     ap.add_argument("--audit", action="store_true")
+    ap.add_argument("--truncate-tokens", type=int, default=0,
+                    help="run with the prompt cut to this many tokens")
+    ap.add_argument("--truncate-sinks", type=int, default=32,
+                    help="leading tokens the truncation keeps")
     ap.add_argument("--force", action="store_true",
                     help="decode the baseline's tokens in every arm and score "
                          "per step, instead of stopping at first divergence")
     ap.add_argument("--script", default="",
                     help="internal: the baseline run whose tokens to force")
+    ap.add_argument("--arms", default="",
+                    help="comma-separated subset to run; off is always first")
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -498,15 +549,30 @@ def main() -> int:
         one_arm(args)
         return 0
 
+    running = ARMS
+    if args.arms:
+        want = [a.strip() for a in args.arms.split(",")]
+        bad = [a for a in want if a not in ARMS]
+        if bad:
+            raise SystemExit(f"unknown arm(s): {', '.join(bad)}")
+        running = tuple(["off"] + [a for a in want if a != "off"])
     arms = {}
     with tempfile.TemporaryDirectory() as tmp:
         script = ""
-        for name in ARMS:
+        for name in running:
             path = os.path.join(tmp, f"{name}.json")
             print(f"=== {name} ===", flush=True)
             env = {**os.environ, **ENV[name]}
-            if name != "off":
+            if name not in ("off", "truncate"):
                 env["VLLM_VIRTUALKV_BUDGET"] = args.budget
+            cut = []
+            if name == "truncate":
+                if not args.budget.isdigit():
+                    raise SystemExit(
+                        "the truncate arm needs --budget in blocks, so the "
+                        f"token cut is unambiguous; got {args.budget!r}")
+                cut = ["--truncate-tokens",
+                       str(int(args.budget) * args.block_size)]
             cmd = [sys.executable, "-u", __file__, args.model,
                    "--transcript", args.transcript,
                    "--turns", str(args.turns),
@@ -515,7 +581,7 @@ def main() -> int:
                    "--util", str(args.util),
                    *(["--audit"] if args.audit else []),
                    *(["--thinking"] if args.thinking else []),
-                   *(["--script", script] if script else []),
+                   *(["--script", script] if script else []), *cut,
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if proc.returncode != 0:
@@ -529,7 +595,7 @@ def main() -> int:
                 script = os.path.join(tmp, "script.json")
                 with open(script, "w") as f:
                     json.dump(arms["off"], f)
-    report(arms, args)
+    report(arms, args, running)
     return 0
 
 

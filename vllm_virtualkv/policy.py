@@ -17,6 +17,8 @@ so it is always resident and always last, and the callers append it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from typing import Protocol
 
 
@@ -255,6 +257,35 @@ class Quest:
         return self._fallback.resident(n_full, num_computed)
 
 
+class MassOracle:
+    """Residency ranked by the *measured* attention mass of the previous step.
+
+    Not shippable and not meant to be: it reconstructs every block's keys and
+    softmaxes them each step, which costs more than the attention it is
+    steering. It exists to answer a question that has to be settled before any
+    estimator is worth building -- whether capturing attention mass actually
+    buys output quality.
+
+    Every scored policy is chasing this ceiling. `quest` with min/max bounds
+    holds 0.66 of the mass, a 2-bit key summary holds 0.87, and this holds
+    0.87 with no estimator at all, because it *is* the truth one step stale.
+    If that does not convert into output quality well above `recency` (0.27),
+    then mass capture is the wrong objective and a better estimator of it is
+    wasted work. This repo has already seen the proxy and the outcome
+    disagree, which is why the ceiling gets tested before the machine.
+    """
+
+    name = "massoracle"
+
+    def __init__(self, budget: int, sink: int = 2) -> None:
+        self.budget = budget
+        self.sink = sink
+        self._fallback = Recency(budget, sink)
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        return self._fallback.resident(n_full, num_computed)
+
+
 class Full:
     """Everything resident. The control arm, and it must be bit-exact.
 
@@ -272,7 +303,39 @@ class Full:
         return list(range(n_full))
 
 
+def choose(n_full: int, budget: int, sink: int, recent: int,
+           unknown: Sequence[int], ranked: Sequence[int]) -> list[int]:
+    """The resident set, as a priority order that is cut and then sorted.
+
+    The order is load-bearing and the cut is where it shows. Sinks first,
+    then blocks that were never scored (a block that could not be ranked must
+    not be treated as unwanted), then the recent window newest-first, then the
+    ranking. Reserved sets overflow the budget routinely -- early in a request
+    almost nothing has been scored -- and something has to give.
+
+    Cutting a list *sorted by block index* discards the highest-numbered
+    blocks, which are the newest: the ones holding what the generation just
+    wrote. That is the most valuable thing in the context and it was what went
+    first. Cut by priority, sort afterwards.
+    """
+    keep = list(range(min(sink, n_full)))
+    keep += list(unknown)
+    if recent:
+        keep += list(range(n_full - 1, max(0, n_full - recent) - 1, -1))
+    for index in ranked:
+        if len(set(keep)) >= budget:
+            break
+        keep.append(index)
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for i in keep:
+        if i not in seen:
+            seen.add(i)
+            ordered.append(i)
+    return sorted(ordered[:max(budget, len(unknown))])
+
+
 POLICIES: dict[str, type[Policy]] = {
-    p.name: p for p in (Recency, Stress, Churn, Quest, Oracle,
+    p.name: p for p in (Recency, Stress, Churn, Quest, MassOracle, Oracle,
                         OracleLate, Full)
 }

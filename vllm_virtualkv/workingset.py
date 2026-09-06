@@ -430,3 +430,40 @@ def tier_step(caches: Sequence[torch.Tensor], req_id: str,
         out[f"degrade@{b}bit"] = sum(err[("degrade", b)]) / len(
             err[("degrade", b)])
     return out
+
+
+def true_mass(caches: Sequence[torch.Tensor], tier, req_id: str,
+              row: Sequence[int], resident, n_full: int,
+              queries: Sequence[torch.Tensor], block_size: int,
+              head_size: int, scale: float, head_size_v: int | None = None,
+              tail: int = 0) -> list[float] | None:
+    """Each block's true attention mass, summed over every layer and head.
+
+    The ceiling a demand signal is estimating. Reconstructs evicted blocks
+    from the host tier, which is the one thing an eviction method could never
+    do and the reason this number is available here at all.
+    """
+    if not queries or n_full <= 0 or not scale:
+        return None
+    device = caches[0].device
+    keys = _keys_for(caches, tier, req_id, row, n_full, head_size,
+                     head_size_v, set(resident), device)
+    if keys is None:
+        return None
+    n_keys = n_full * block_size
+    total = torch.zeros(n_full, device=device)
+    for layer, (q, layer_keys) in enumerate(zip(queries, keys)):
+        kv_heads = layer_keys.shape[0]
+        if layer_keys.shape[1] < n_keys:
+            return None
+        layer_keys = layer_keys[:, :n_keys, :]
+        qq = q.float().reshape(kv_heads, -1, q.shape[-1])
+        full = layer_keys
+        if tail > 0 and len(row) > n_full:
+            edge = block_keys(caches[layer], row[n_full], head_size,
+                              head_size_v)[:, :tail, :].float()
+            full = torch.cat([layer_keys, edge], dim=1)
+        w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, full) * scale, -1)
+        total += w[..., :n_keys].reshape(*w.shape[:2], n_full,
+                                         block_size).sum(-1).sum(dim=(0, 1))
+    return [float(x) for x in total]

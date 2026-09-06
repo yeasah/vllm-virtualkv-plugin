@@ -44,8 +44,10 @@ import torch
 from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
+from .policy import choose
 from .audit import audit_step
-from .workingset import summary_step, tier_step, working_set_step
+from .workingset import (summary_step, tier_step, true_mass,
+                         working_set_step)
 from .quest import QueryCapture, QuestScorer
 
 if TYPE_CHECKING:
@@ -246,6 +248,8 @@ class WorkerPager:
             self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
             if self.config is not None and (self.config.policy == "quest"
+                                            or self.config.policy
+                                            == "massoracle"
                                             or self.config.audit
                                             or self.config.working_set):
                 spec = runner.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -420,28 +424,33 @@ class WorkerPager:
         if not queries:
             self.no_queries += 1
             return
-        ranked = self.scorer.rank(req_id, range(n_full), queries)
+        if self.config is not None and self.config.policy == "massoracle":
+            # The ceiling: rank on measured mass rather than an estimate of
+            # it. Evicted blocks come back from the host tier to be scored,
+            # so the ranking covers the whole context and not just what is
+            # resident.
+            mass = true_mass(
+                caches, self.tier, req_id, row, step.resident, n_full,
+                queries, block_size, self._spec.head_size,
+                self.capture.scale, self._spec.head_size_v,
+                tail=computed % block_size + 1)
+            if mass is None:
+                return
+            ranked = sorted(enumerate(mass), key=lambda kv: -kv[1])
+        else:
+            ranked = self.scorer.rank(req_id, range(n_full), queries)
         if not ranked:
             return
         self.ranked += 1
         sink = self.config.sink if self.config else 0
         recent = self.config.recent if self.config else 0
-        keep = list(range(min(sink, n_full)))
-        # A floor under the newest blocks, reserved before anything is scored.
-        # Without it a ranking is free to drop the context a generation is
-        # actively building on, which is cheap in average attention mass and
-        # ruinous in answers.
-        if recent:
-            keep += [i for i in range(max(0, n_full - recent), n_full)]
-        unknown = [i for i in range(n_full)
-                   if (req_id, i) not in self.scorer.bounds]
+        unknown = [] if (self.config is not None
+                         and self.config.policy == "massoracle") else [
+            i for i in range(n_full)
+            if (req_id, i) not in self.scorer.bounds]
         self.unscored += len(unknown)
-        keep += unknown                          # never drop what was not scored
-        for index, _score in ranked:
-            if len(set(keep)) >= budget:
-                break
-            keep.append(index)
-        selection = sorted(set(keep))[:max(budget, len(unknown))]
+        selection = choose(n_full, budget, sink, recent, unknown,
+                           [i for i, _ in ranked])
         if self.last_selection:
             moved = len(set(selection) ^ set(self.last_selection))
             self.churn_moves += moved
@@ -452,7 +461,8 @@ class WorkerPager:
         # from there would make switching the measurement on change the thing
         # being measured, which it did: an audited `recency` run silently
         # became `quest` and the two reported identical numbers.
-        if self.config is not None and self.config.policy == "quest":
+        if self.config is not None and self.config.policy in ("quest",
+                                                             "massoracle"):
             self.state.desired[req_id] = selection
 
     def _audit_previous(self, runner) -> None:
