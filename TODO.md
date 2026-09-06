@@ -210,6 +210,35 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `sink-mass` — the baseline was a strawman, and that explains the rest
+
+**Two blocks of 112 hold 0.4580 of all attention mass.** The shipped
+`recency` policy keeps `sink=2`; the selector every mass number in this repo
+was compared against kept none. So:
+
+| selector | mass captured |
+|---|---|
+| oracle | 0.8812 |
+| 2-bit keys, one step stale | 0.8811 |
+| **sinks + recency (what ships)** | **0.7907** |
+| recency, no sinks (what was quoted) | 0.3384 |
+
+The reported "2-bit captures 0.8708 against recency's 0.2743, 3.2x" is wrong.
+The real comparison is 0.8811 against 0.7907 — **11% relative, not 220%**.
+
+This dissolves the puzzle rather than deepening it. There was never a large
+gap for a demand signal to close: a scored policy can add at most ten points
+of mass over what recency gets for free, and a ten-point gain on a proxy that
+tracks output damage only loosely is exactly the size of effect that vanishes
+end to end. `massoracle` losing to `recency` stops being a contradiction and
+becomes a marginal gain minus churn cost.
+
+It is also the mechanism behind mass and importance diverging: 46% of mass in
+two blocks carrying no information is what the sink literature describes.
+
+The 2-bit summary still ranks at the oracle ceiling. That result stands; the
+value of ranking well is what shrank.
+
 ## `proxy-is-broken` — mass capture ordered the policies backwards
 
 The demand-signal work optimises attention mass captured. End to end, on a

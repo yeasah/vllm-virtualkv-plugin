@@ -66,12 +66,20 @@ and the shape of it has been measured rather than assumed. At a budget of 23 of
 
 | selector | mass captured |
 |---|---|
-| oracle (ceiling) | 0.8756 |
-| **2-bit keys, one step stale — deployable** | **0.8708** |
-| min/max bound | 0.6396 |
-| recency (what ships today) | 0.2743 |
+| oracle (ceiling) | 0.8812 |
+| **2-bit keys, one step stale — deployable** | **0.8811** |
+| min/max bound | 0.6466 |
+| **sinks + recency (what ships today)** | **0.7907** |
+| recency without sinks | 0.3384 |
 
-Three results in that table. Quantized keys rank as well as the true keys, at
+**Read the last two rows together.** Two blocks of 112 hold 46% of all
+attention mass, and the shipped policy keeps them. A selector that does not
+looks 2.3x worse than it is, and every earlier version of this table made
+that mistake. The gap a demand signal can close is 0.7907 to 0.8811 — 11%,
+not the 220% a sinkless baseline implies — which is small enough to explain
+why it does not show up end to end.
+
+Three further results in that table. Quantized keys rank as well as the true keys, at
 two bits, because ranking needs order and not accuracy. Quest-style min/max
 bounds — which this project assumed were the answer — rank at 0.64 and cannot
 prove anything either, overstating true mass by 9.4 orders of magnitude. And

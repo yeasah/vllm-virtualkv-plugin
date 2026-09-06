@@ -157,13 +157,25 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
         return float(true_sum[pick].sum()) / total
 
     recency = torch.arange(n_full, device=device, dtype=torch.float32)
+    #: Recency *with sinks*, which is what actually ships. The pure-recency
+    #: floor above keeps none, and StreamingLLM's whole finding is that the
+    #: first tokens absorb large attention mass while carrying no
+    #: information -- so the gap between these two rows is how much of the
+    #: "missed" mass is sink mass that no policy should want.
+    sink_recency = recency.clone()
+    sink_recency[:2] = float(n_full + 10)
     out = {"n_full": n_full, "budget": budget,
            "oracle": captured(true_sum),
            "bound": captured(bound_max),
            "recency": captured(recency),
            # Rank on layer 0 alone, score on every layer's mass: what a
            # signal computable before the forward would actually buy.
-           "layer0": captured(per_layer[0])}
+           "layer0": captured(per_layer[0]),
+           "sink_recency": captured(sink_recency),
+           # Mass sitting in the first two blocks alone. If this is most of
+           # what recency misses, mass and importance come apart exactly
+           # where the sink literature says they do.
+           "sink_mass": float(true_sum[:2].sum()) / total}
     for bits in BITS:
         out[f"q{bits}"] = captured(est_sum[bits])
     if stale:

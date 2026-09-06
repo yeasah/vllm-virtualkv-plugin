@@ -81,7 +81,7 @@ SOURCE = ("HuggingFaceH4/ultrachat_200k", "default", "test_sft")
 ROWS = "https://datasets-server.huggingface.co/rows?"
 
 
-def from_trajectory(path: str) -> dict:
+def from_trajectory(path: str, keep_reasoning: bool = True) -> dict:
     """A mini-swe-agent trace as an alternating transcript.
 
     Why an agent trace rather than a chat: the dependency is structural
@@ -103,9 +103,9 @@ def from_trajectory(path: str) -> dict:
         traj = json.load(f)
     msgs = traj["messages"]
 
-    def render(x) -> str:
+    def render(x, keep_reasoning: bool = True) -> str:
         parts = []
-        if x.get("reasoning_content"):
+        if keep_reasoning and x.get("reasoning_content"):
             parts.append(str(x["reasoning_content"]))
         if x.get("content"):
             parts.append(str(x["content"]))
@@ -126,7 +126,7 @@ def from_trajectory(path: str) -> dict:
         elif role == "tool":
             pending.append(render(x))
         elif role == "assistant":
-            text = render(x)
+            text = render(x, keep_reasoning)
             if not text:
                 continue
             # An assistant turn needs something before it to answer.
@@ -149,7 +149,13 @@ def fetch(args) -> int:
     difference wastes its budget on it.
     """
     if args.traj:
-        out = from_trajectory(args.traj)
+        # Qwen3's template drops prior <think> blocks and keeps only each
+        # earlier turn's final answer -- verified, not assumed. Reasoning is
+        # 93% of assistant text in these traces and is where every turn
+        # restates the task, so keeping it builds a transcript far more
+        # redundant than any deployment, and that redundancy is exactly what
+        # lets a recency window survive without the original task statement.
+        out = from_trajectory(args.traj, keep_reasoning=not args.strip_reasoning)
         with open(args.fetch, "w") as f:
             json.dump(out, f, indent=1)
         turns = sum(1 for m in out["session"] if m["role"] == "user")
@@ -578,6 +584,9 @@ def main() -> int:
                     help="write a transcript here instead of running")
     ap.add_argument("--traj", default="",
                     help="build the transcript from a mini-swe-agent .traj.json")
+    ap.add_argument("--strip-reasoning", action="store_true",
+                    help="drop prior reasoning from history, as the chat "
+                         "template does in a real agent loop")
     ap.add_argument("--chain", type=int, default=3,
                     help="conversations to chain into one session")
     ap.add_argument("--offset", type=int, default=0)

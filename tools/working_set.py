@@ -107,12 +107,15 @@ def main() -> int:
         order = [("oracle", "oracle (ceiling)"), ("q8", "8-bit keys"),
                  ("q4", "4-bit keys"), ("q2", "2-bit keys"),
                  ("bound", "min/max bound"), ("layer0", "layer-0 queries"),
-                 ("recency", "recency (floor)"),
+                 ("sink_recency", "sinks + recency"),
+                 ("recency", "recency, no sinks"),
                  ("oracle_stale", "oracle, 1 step stale"),
                  ("q2_stale", "2-bit keys, 1 step stale")]
         for k, label in order:
             if k in sm:
                 print(f"    {label:20s} {sm[k]:.4f}")
+        print(f"\n  mass in the first two blocks alone: "
+              f"{sm.get('sink_mass', 0):.4f}")
         print(f"\n  under the oracle pick: median layer keeps "
               f"{sm.get('median_layer', 0):.4f}, worst layer keeps "
               f"{sm.get('worst_layer', 0):.4f} "
