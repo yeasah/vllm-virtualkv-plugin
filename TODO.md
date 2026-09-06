@@ -264,6 +264,28 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `capability-suite` — the harness that could actually judge a policy
+
+Neither existing harness can. The needle needs distant retrieval but answers in
+the first token or two, before a query-aware policy has seen a query. GSM8K as
+turns has long generations but independent questions -- the history is ballast,
+nothing in turn eight depends on turn three, and a policy that drops the middle
+loses almost nothing. That is why one is policy-sensitive and the other
+mechanism-sensitive, and lengthening either does not convert it.
+
+What is wanted is genuine cross-turn dependency *with* long generations: a
+conversation whose later turns require what earlier ones established. That is
+a benchmark question rather than a flag, and it is the thing standing between
+here and an answer on whether scoring beats recency.
+
+Two pieces of it now exist in `gsm8k_turns.py` and are worth keeping whatever
+replaces it. `--chat` with `--thinking` puts the decode-token volume where a
+real request has it: Qwen3 emits 1000-6700 characters of reasoning per turn
+against a ~300-character gold answer, and that trace is most of what a pager
+has to serve. `--replay` feeds a previous run's generations back as the shared
+history, so the conversation is model-shaped and still identical across arms --
+which is the only way to have both length and pairing.
+
 ## `serving-exposure` — point something real at it
 
 `tools/gsm8k_turns.py` is the halfway house: a growing conversation with a high

@@ -16,11 +16,23 @@ a drop a mechanism signal rather than a policy one, which is the opposite of
 here says the machinery survives sustained multi-turn use; it says nothing
 about whether a policy is any good.
 
-**Every arm sees the same conversation.** Turns are extended with the *gold*
-answer, never the model's own. Feeding back what the model said would fork the
-context the first time two arms disagreed, and every turn after that would be
-comparing different conversations rather than different residency -- the same
-trap that makes generated-token comparison a bad instrument.
+**Every arm sees the same conversation**, which is why turns are extended with
+the *gold* answer rather than the model's own: feeding back what the model said
+would fork the context the first time two arms disagreed, and every turn after
+would compare different conversations rather than different residency.
+
+`--replay` gets the length back without the fork. The `off` arm runs first and
+its generations become the history every arm is given, so the conversation is
+model-shaped -- verbose, and carrying reasoning traces if the model produces
+them -- while still being one conversation. Gold answers are terse and make a
+chat-mode context grow far too slowly for a residency budget to bind at all.
+
+**What none of this fixes**: GSM8K turns are independent questions, so the
+history is ballast. Nothing in turn eight depends on turn three, and a policy
+that drops the middle of the conversation loses little -- which is exactly why
+this harness is mechanism-sensitive and policy-insensitive, and why lengthening
+it does not make it a policy instrument. A task with genuine cross-turn
+dependency is capability-suite work, not a flag here.
 
 **`--chat` renders the conversation with the model's own template**, and for
 anything modern that is the mode that matters. Two reasons, neither cosmetic:
@@ -76,6 +88,19 @@ def gold_of(answer: str) -> str:
     return _normalise(answer.split("####")[-1].strip().replace(",", ""))
 
 
+def answer_part(text: str) -> str:
+    """The answer, not the reasoning that led to it.
+
+    A thinking model emits its trace first and the last number in *that* is
+    whatever it was considering when it stopped -- which scored 0/4 on a model
+    that had the answers, because the extractor was reading the middle of the
+    reasoning. Only the part after the trace is the answer.
+    """
+    if "</think>" in text:
+        return text.rsplit("</think>", 1)[-1]
+    return text
+
+
 def predicted(text: str) -> str | None:
     """The last number in the answer, normalised the way the gold one is.
 
@@ -86,7 +111,7 @@ def predicted(text: str) -> str | None:
     happened to end with a period was penalised against one that did not, which
     is exactly the shape of a difference that gets mistaken for a result.
     """
-    hits = re.findall(r"-?\d[\d,]*\.?\d*", text.replace(",", ""))
+    hits = re.findall(r"-?\d[\d,]*\.?\d*", answer_part(text).replace(",", ""))
     if not hits:
         return None
     return _normalise(hits[-1])
@@ -136,6 +161,11 @@ def one_arm(args):
     # In chat mode the turns are real messages and the template does the
     # framing; the gold answer still stands in for the model's own, so every
     # arm sees one conversation.
+    replay = None
+    if args.replay:
+        with open(args.replay) as f:
+            replay = [t.get("text", "") for t in json.load(f)["turns"]]
+
     messages: list[dict] = []
     turns, context = [], shots
     for t in range(args.turns):
@@ -148,6 +178,7 @@ def one_arm(args):
         out = llm.generate([prompt], params)[0]
         text = out.outputs[0].text
         turns.append({
+            "text": text,
             "gold": gold_of(item["answer"]),
             "pred": predicted(text),
             "ids": [int(x) for x in out.outputs[0].token_ids],
@@ -155,11 +186,17 @@ def one_arm(args):
                    for s in (out.outputs[0].logprobs or [])],
             "prompt_chars": len(prompt),
         })
-        # The gold answer, not the model's: every arm must see one conversation.
+        # One conversation for every arm. Either the gold answer, or -- with
+        # --replay -- the baseline's own generation, which is model-shaped and
+        # still identical across arms because it comes from a file rather than
+        # from whichever arm is running.
+        history = item["answer"]
+        if replay is not None and t < len(replay) and replay[t].strip():
+            history = replay[t]
         if args.chat:
-            messages.append({"role": "assistant", "content": item["answer"]})
+            messages.append({"role": "assistant", "content": history})
         else:
-            context = prompt + f" {item['answer']}\n\n"
+            context = prompt + f" {history}\n\n"
 
     result = {"turns": turns}
     if made:
@@ -181,8 +218,13 @@ def main():
     ap.add_argument("--shots", type=int, default=4)
     ap.add_argument("--budget", default="25%")
     ap.add_argument("--max-len", type=int, default=8192)
-    ap.add_argument("--max-tokens", type=int, default=256)
+    #: A thinking model needs room for the trace *and* the answer; 256 cuts
+    #: Qwen3 off mid-reasoning, and a truncated trace has no answer in it at
+    #: all. Raised automatically for --thinking unless set explicitly.
+    ap.add_argument("--max-tokens", type=int, default=0)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--replay", default="",
+                    help="JSON of a previous off-arm run, used as the history")
     ap.add_argument("--chat", action="store_true",
                     help="render turns with the model's chat template")
     ap.add_argument("--thinking", action="store_true",
@@ -191,6 +233,8 @@ def main():
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
+    if not args.max_tokens:
+        args.max_tokens = 2048 if args.thinking else 256
 
     if args.arm:
         return one_arm(args) or 0
@@ -211,6 +255,7 @@ def main():
                    *(["--audit"] if args.audit else []),
                    *(["--chat"] if args.chat else []),
                    *(["--thinking"] if args.thinking else []),
+                   *(["--replay", args.replay] if args.replay else []),
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if proc.returncode != 0:
