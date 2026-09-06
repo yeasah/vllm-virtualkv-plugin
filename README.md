@@ -136,7 +136,18 @@ VIRTUALKV_TEST_MODEL=<model> pytest tests/          # adds the control arm
 tools/smoke.py <model> --budget 16                  # end to end, three arms
 tools/quality.py <model> --budget 16                # the needle table above
 tools/guard_selftest.py <model>                     # the guard, faulted
+tools/gsm8k_turns.py <model> --budget 25%           # multi-turn, scored
 ```
+
+`gsm8k_turns.py` is the multi-turn instrument, and it is sensitive to the
+opposite thing from `quality.py`. Each GSM8K question needs the exemplars at
+the start and the question at the end and nothing between, so no sane policy
+loses accuracy on it — which makes a drop a *mechanism* signal rather than a
+policy one, while the needle test is policy-sensitive by construction. Turns
+are extended with the gold answer, never the model's own, so every arm sees one
+conversation; feeding back what the model said would fork the context the first
+time two arms disagreed and every later turn would compare different
+conversations rather than different residency.
 
 ## What it reaches past
 

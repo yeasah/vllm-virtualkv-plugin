@@ -163,3 +163,35 @@ def test_a_sink_larger_than_the_resolved_budget_is_caught_late():
     cfg.validate()                       # nothing knowable yet
     with pytest.raises(ValueError, match="exceeds the resolved budget"):
         cfg.resolve(fake_config(2048, 16, 1))      # 1% of 2048 = 1 block
+
+
+def test_the_tier_is_sized_from_the_resolved_budget_not_the_written_one():
+    """A budget written as a share is not a number until an engine exists.
+
+    The worker is constructed before one does, so capturing the budget at
+    construction gave `required_host_slots(0, ...)` -- a tier of one slot,
+    which refuses nearly every eviction and quietly stops paging. The plugin
+    kept working, because a refused eviction leaves the block resident, so the
+    only symptoms were a refusal counter in the tens of thousands and no
+    memory being saved.
+    """
+    from vllm_virtualkv.integration import required_host_slots
+    from vllm_virtualkv.worker import WorkerPager
+
+    engine = fake_config(8192, 16, 1)
+    cfg = Config(budget="25%")
+    pager = WorkerPager(config=cfg)
+
+    assert cfg.budget == 0, "the premise: unresolved at construction"
+    cfg.resolve(engine)                      # what the spec hook does later
+    assert cfg.budget == 128
+
+    class FakeRunner:
+        vllm_config = engine
+        kv_caches = [torch.zeros((4, 1, 1, 2))]
+
+    pager._attach(FakeRunner())
+    assert pager.budget == 128
+    assert pager.tier.num_slots == required_host_slots(128, engine) == 384, (
+        f"tier sized {pager.tier.num_slots} for a budget the worker read as "
+        f"{pager.budget}")

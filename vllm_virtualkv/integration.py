@@ -151,9 +151,8 @@ def enable(config: Config | None = None, scheduler=None):
 
     config = config or Config.from_env()
     original = patch_spec(config)
-    pager = WorkerPager(host_slots=config.host_slots, scheduler=scheduler,
-                        verify=config.verify, budget=config.budget,
-                        show_pending=config.show_pending)
+    pager = WorkerPager(scheduler=scheduler, verify=config.verify,
+                        show_pending=config.show_pending, config=config)
     pager.install()
     return config, pager, original
 

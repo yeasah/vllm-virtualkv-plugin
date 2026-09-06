@@ -135,6 +135,13 @@ hoped for. Nothing here proves that case occurred.
 
 ## `serving-exposure` — point something real at it
 
+`tools/gsm8k_turns.py` is the halfway house: a growing conversation with a high
+prefix hit rate, scored against ground truth, replayable across arms. It found
+a config-ordering bug on its first run (below), which is the argument for it.
+It is not a substitute for real traffic — the request shapes are still ones we
+chose.
+
+
 The argument for doing this earlier than its dependencies suggest: benchmarks
 cover the request shapes we thought of, and real traffic covers the ones we did
 not. Multi-turn conversations, aborts, preemption, ragged lengths and the

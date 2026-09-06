@@ -69,7 +69,13 @@ class WorkerPager:
 
     def __init__(self, host_slots: int | None = None,
                  scheduler: Scheduler | None = None, verify: bool = True,
-                 budget: int = 0, show_pending: bool = False) -> None:
+                 budget: int = 0, show_pending: bool = False,
+                 config=None) -> None:
+        #: Read at attach time rather than now, because a budget written as a
+        #: share or in tokens is not resolved into blocks until an engine
+        #: exists -- and this object is built before one does. Capturing the
+        #: numbers here instead gave a tier sized for a budget of zero.
+        self.config = config
         self.show_pending = show_pending
         #: None means derive it from the engine at attach time, which is the
         #: first moment the model length, block size and concurrency are all
@@ -204,10 +210,12 @@ class WorkerPager:
             from .integration import required_host_slots
 
             self.runner = runner
-            slots = self.host_slots
+            budget, slots = self.budget, self.host_slots
+            if self.config is not None:
+                budget, slots = self.config.budget, self.config.host_slots
+                self.budget, self.host_slots = budget, slots
             if slots is None:
-                slots = max(1, required_host_slots(self.budget,
-                                                   runner.vllm_config))
+                slots = max(1, required_host_slots(budget, runner.vllm_config))
             self.host_slots = slots
             self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
