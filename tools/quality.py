@@ -74,7 +74,7 @@ def one_arm(args):
         # keep it from the very first decision and never restore anything.
         OracleLate.after = len(prompt_ids) + 2
         patch_spec(budget, args.sink, policy,
-                   host_slots=args.host_slots, audit=args.audit)
+                   host_slots=args.host_slots or None, audit=args.audit)
 
     # Chunked prefill on purpose. With the whole prompt in one chunk the
     # scheduler makes exactly one residency decision before decoding starts, so
@@ -125,7 +125,9 @@ def main():
     ap.add_argument("--sink", type=int, default=2)
     ap.add_argument("--needle-block", type=int, default=40)
     ap.add_argument("--block-size", type=int, default=16)
-    ap.add_argument("--host-slots", type=int, default=1024)
+    ap.add_argument("--host-slots", type=int, default=0,
+                    help="0 lets the tier size itself; a block is not a "
+                         "fixed size across models")
     ap.add_argument("--util", type=float, default=0.55)
     ap.add_argument("--max-batched", type=int, default=512)
     ap.add_argument("--audit", action="store_true",

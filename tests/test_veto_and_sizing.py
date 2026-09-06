@@ -214,3 +214,32 @@ def test_the_tier_is_sized_from_the_resolved_budget_not_the_written_one():
     assert pager.tier.num_slots == required_host_slots(128, engine) == 384, (
         f"tier sized {pager.tier.num_slots} for a budget the worker read as "
         f"{pager.budget}")
+
+
+def test_a_tier_too_large_for_host_ram_is_refused():
+    """A slot count is not a size, and pinned pages cannot swap.
+
+    `tools/quality.py` defaulted to 1024 slots. On a 36-layer model with
+    16-token blocks that is 32 MiB and invisible; on a hybrid where vLLM
+    raises the attention block to 528 tokens to match the mamba page it is
+    16.9 GiB, and the process is OOM-killed rather than slowed, because the
+    allocation is page-locked. The block count was right and the byte count
+    was never checked.
+    """
+    import pytest
+    import torch
+    from vllm_virtualkv.hosttier import HostTier
+
+    # One "block" of 64 MiB, then ask for far more slots than RAM allows.
+    big = torch.zeros((2, 4, 528, 512), dtype=torch.float32)
+    with pytest.raises(ValueError, match="cannot swap"):
+        HostTier([big] * 8, num_slots=100_000, pin=False)
+
+
+def test_a_tier_that_fits_is_allowed():
+    import torch
+    from vllm_virtualkv.hosttier import HostTier
+
+    small = torch.zeros((2, 1, 16, 32), dtype=torch.float16)
+    tier = HostTier([small], num_slots=8, pin=False)
+    assert tier.num_slots == 8
