@@ -17,6 +17,28 @@ so it is always resident and always last, and the callers append it.
 
 from __future__ import annotations
 
+from typing import Protocol
+
+
+class Policy(Protocol):
+    """What every policy here is, so a new one has something to conform to.
+
+    `resident` answers one question -- given a request with `n_full` completely
+    full blocks and `num_computed` tokens committed, which of those blocks
+    should be on the GPU -- and answers it as ascending *logical* row indices.
+    It must be a pure function of its arguments: the scheduler and the worker
+    both call it, on different clocks, and anything it remembers between calls
+    would drift between the two.
+
+    The partial tail block is never returned. It holds the key the current step
+    is about to write, so it is always resident and always last, and the
+    callers append it.
+    """
+
+    name: str
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]: ...
+
 
 class Recency:
     """Sinks plus the most recent blocks -- StreamingLLM's set.
@@ -30,7 +52,7 @@ class Recency:
 
     name = "recency"
 
-    def __init__(self, budget: int, sink: int = 2):
+    def __init__(self, budget: int, sink: int = 2) -> None:
         self.budget = budget
         self.sink = sink
 
@@ -60,7 +82,8 @@ class Stress:
 
     name = "stress"
 
-    def __init__(self, budget: int, sink: int = 2, recent: int = 4, churn: int = 1):
+    def __init__(self, budget: int, sink: int = 2, recent: int = 4,
+                 churn: int = 1) -> None:
         self.budget = budget
         self.sink = sink
         self.recent = recent
@@ -99,9 +122,9 @@ class Oracle:
     """
 
     name = "oracle"
-    must_keep: set = set()
+    must_keep: set[int] = set()
 
-    def __init__(self, budget: int, sink: int = 2):
+    def __init__(self, budget: int, sink: int = 2) -> None:
         self.budget = budget
         self.sink = sink
 
@@ -153,11 +176,13 @@ class Full:
 
     name = "full"
 
-    def __init__(self, budget: int = 0, sink: int = 0):
+    def __init__(self, budget: int = 0, sink: int = 0) -> None:
         pass
 
     def resident(self, n_full: int, num_computed: int) -> list[int]:
         return list(range(n_full))
 
 
-POLICIES = {p.name: p for p in (Recency, Stress, Oracle, OracleLate, Full)}
+POLICIES: dict[str, type[Policy]] = {
+    p.name: p for p in (Recency, Stress, Oracle, OracleLate, Full)
+}

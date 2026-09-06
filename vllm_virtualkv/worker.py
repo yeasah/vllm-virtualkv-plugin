@@ -37,36 +37,57 @@ tail is an invariant the guard checks rather than a convention.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import torch
 
 from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier
 
+if TYPE_CHECKING:
+    # Under TYPE_CHECKING only: this package is imported by vLLM's plugin
+    # loader before much of vLLM itself is importable, and none of these are
+    # needed at runtime. They are here because the shapes flowing through the
+    # hooks are the hardest part of this file to read from the code alone --
+    # `prepared`, in particular, is a tuple of a *tuple of tensors* and a
+    # single tensor, one entry per KV cache group.
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    #: What `GPUModelRunner.prepare_attn` returns: per KV cache group, the
+    #: gathered block tables, and the slot mappings for this step's tokens.
+    PreparedAttn = tuple[tuple[torch.Tensor, ...], torch.Tensor | None]
+    #: batch index -> (logical row, resident logical indices, view seq_len)
+    StepPlan = dict[int, tuple[list[int], list[int], int]]
+
 
 class WorkerPager:
     """Applies the published decisions to the KV cache and the kernel's view."""
 
-    def __init__(self, host_slots: int, scheduler=None, verify=True):
+    def __init__(self, host_slots: int, scheduler: Scheduler | None = None,
+                 verify: bool = True) -> None:
         self.host_slots = host_slots
         self.scheduler = scheduler
         self.verify = verify
-        self.state = pager_state.current()
+        self.state: pager_state.PagerState = pager_state.current()
         self.tier: HostTier | None = None
         self.guard: ResidencyGuard | None = None
-        self.runner = None
-        self.steps = 0
-        self.copied_in = 0
-        self.copied_out = 0
-        self.missing_host_copy = 0
+        self.runner: GPUModelRunner | None = None
+        self.steps: int = 0
+        self.copied_in: int = 0
+        self.copied_out: int = 0
+        self.missing_host_copy: int = 0
         #: steps where the manager's committed token count and the worker's
         #: disagree. The two sides derive the tail block from this number, so a
         #: lag between them shifts the whole view by a block.
-        self.clock_mismatch = 0
-        #: batch index -> (row, resident indices, seq_len) for this step
-        self._plan: dict = {}
+        self.clock_mismatch: int = 0
+        #: this step's decisions, read back by `view` at the metadata builder
+        self._plan: StepPlan = {}
 
-    def attach_scheduler(self, scheduler) -> None:
+    def attach_scheduler(self, scheduler: Scheduler) -> None:
         """Turn on the ownership check, once a scheduler is reachable.
 
         Only possible in-process. Kept separate from construction because the
@@ -77,14 +98,15 @@ class WorkerPager:
         if self.guard is not None:
             self.guard.scheduler = scheduler
 
-    def install(self):
+    def install(self) -> None:
         from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
         if getattr(GPUModelRunner.prepare_attn, "_pager_hooked", False):
             return
         original = GPUModelRunner.prepare_attn
 
-        def hooked(runner, input_batch, *args, **kwargs):
+        def hooked(runner: GPUModelRunner, input_batch: InputBatch,
+                   *args: Any, **kwargs: Any) -> PreparedAttn:
             self._attach(runner)
             self._wrap_builders(runner)
             self._sync_rows(runner, input_batch)
@@ -95,7 +117,7 @@ class WorkerPager:
         hooked._pager_hooked = True
         GPUModelRunner.prepare_attn = hooked
 
-    def _wrap_builders(self, runner):
+    def _wrap_builders(self, runner: GPUModelRunner) -> None:
         """Interpose on every full-attention metadata builder, once."""
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -108,7 +130,7 @@ class WorkerPager:
                         continue
                     original = builder.build
 
-                    def wrapper(*a, _orig=original, **kw):
+                    def wrapper(*a: Any, _orig=original, **kw: Any) -> Any:
                         key = "common_attn_metadata"
                         if key in kw:
                             kw[key] = self.view(kw[key])
@@ -119,7 +141,7 @@ class WorkerPager:
                     wrapper._pager_hooked = True
                     builder.build = wrapper
 
-    def _sync_rows(self, runner, batch) -> None:
+    def _sync_rows(self, runner: GPUModelRunner, batch: InputBatch) -> None:
         """Make the worker's own block table equal the manager's mapping.
 
         This has to run *before* the stock `prepare_attn`, because
@@ -153,7 +175,7 @@ class WorkerPager:
             tables.num_blocks.np[0, req_idx] = len(step.row)
         tables.num_blocks.copy_to_uva()
 
-    def view(self, common):
+    def view(self, common: CommonAttentionMetadata) -> CommonAttentionMetadata:
         """Replace the kernel's context length and block table with the view."""
         if not self._plan:
             return common
@@ -167,13 +189,14 @@ class WorkerPager:
             seq_lens[b] = seq_len
         return common.replace(seq_lens=seq_lens, block_table_tensor=table)
 
-    def _attach(self, runner):
+    def _attach(self, runner: GPUModelRunner) -> None:
         if self.tier is None:
             self.runner = runner
             self.tier = HostTier(runner.kv_caches, self.host_slots)
             self.guard = ResidencyGuard(self.scheduler)
 
-    def apply(self, runner, batch, prepared):
+    def apply(self, runner: GPUModelRunner, batch: InputBatch,
+              prepared: PreparedAttn) -> None:
         block_tables, slot_mappings = prepared
         if not block_tables:
             return
@@ -244,7 +267,8 @@ class WorkerPager:
             self.guard.check_step(batch, view_table, view_seq, slots,
                                   block_size, intended)
 
-    def _resident_now(self, step, computed, block_size, row_len) -> list[int]:
+    def _resident_now(self, step: pager_state.RequestStep, computed: int,
+                      block_size: int, row_len: int) -> list[int]:
         """The manager's choice of full blocks, with *this* step's tail.
 
         The two sides run on different clocks and must: the manager frees
@@ -268,7 +292,8 @@ class WorkerPager:
         keep += [i for i in range(mgr_tail, tail + 1) if i < row_len]
         return keep
 
-    def _validate(self, req_id, row, resident, num_blocks) -> None:
+    def _validate(self, req_id: str, row: list[int], resident: list[int],
+                  num_blocks: int) -> None:
         """Fail where the mistake is, not where the GPU notices it.
 
         A bad block id written into the view is dereferenced by the attention
@@ -289,7 +314,7 @@ class WorkerPager:
                 f"{req_id}: block ids {bad_ids[:4]} are outside a pool of "
                 f"{num_blocks} blocks")
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         out = {"steps": self.steps, "copied_in": self.copied_in,
                "copied_out": self.copied_out,
                "missing_host_copy": self.missing_host_copy,

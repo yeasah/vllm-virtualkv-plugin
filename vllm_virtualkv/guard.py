@@ -41,6 +41,13 @@ reports which were active so a result can carry that rather than imply it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 @dataclass(frozen=True)
@@ -71,7 +78,9 @@ class ResidencyGuard:
     #: ...and the one that needs the scheduler's allocation table.
     NEEDS_SCHEDULER = ("ownership",)
 
-    def __init__(self, scheduler=None, reserve=(), group: int = 0):
+    def __init__(self, scheduler: Scheduler | None = None,
+                 reserve: 'set[int] | tuple[int, ...]' = (),
+                 group: int = 0) -> None:
         self.scheduler = scheduler
         self.reserve = set(reserve)
         self.group = group
@@ -110,8 +119,10 @@ class ResidencyGuard:
         pool = self.scheduler.kv_cache_manager.coordinator.block_pool
         return pool.null_block.block_id
 
-    def check_step(self, batch, block_table, seq_lens, slot_mapping, block_size,
-                   intended):
+    def check_step(self, batch: InputBatch, block_table: torch.Tensor,
+                   seq_lens: torch.Tensor,
+                   slot_mapping: torch.Tensor | None, block_size: int,
+                   intended: dict[str, int]) -> list[Violation]:
         """One decode step. Returns the violations found, and records them.
 
         `intended` maps req_id to the number of blocks the policy meant to be
@@ -184,7 +195,7 @@ class ResidencyGuard:
         self.violations.extend(found)
         return found
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         by_check: dict[str, int] = {}
         for v in self.violations:
             by_check[v.check] = by_check.get(v.check, 0) + 1

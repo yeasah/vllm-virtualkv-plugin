@@ -45,10 +45,10 @@ class RequestStep:
 class PagerState:
     """Per-request decisions, replaced each time the manager runs."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.steps: dict[str, RequestStep] = {}
-        self.block_size = 0
-        self.publishes = 0
+        self.block_size: int = 0
+        self.publishes: int = 0
 
     def publish(self, req_id: str, step: RequestStep) -> None:
         self.steps[req_id] = step

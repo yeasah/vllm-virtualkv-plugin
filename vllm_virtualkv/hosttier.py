@@ -31,7 +31,15 @@ deleting the synchronisation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import torch
+
+#: What a block is keyed by while it is away: the request it belongs to and
+#: its *logical* index in that request, never a physical block id -- the whole
+#: point is that it can come back somewhere else.
+BlockKey = tuple[str, int]
 
 
 class HostTierFull(Exception):
@@ -41,7 +49,8 @@ class HostTierFull(Exception):
 class HostTier:
     """A slotted, pinned host-side store for evicted KV blocks."""
 
-    def __init__(self, kv_caches, num_slots: int, pin: bool = True):
+    def __init__(self, kv_caches: Sequence[torch.Tensor], num_slots: int,
+                 pin: bool = True) -> None:
         if not kv_caches:
             raise ValueError("no KV caches to shadow")
         self.num_slots = num_slots
@@ -54,13 +63,13 @@ class HostTier:
             c[0].numel() * c.element_size() for c in kv_caches
         )
         self._free = list(range(num_slots))
-        self._slot: dict = {}
+        self._slot: dict[BlockKey, int] = {}
         self.stores = 0
         self.loads = 0
 
     # -- residency of the *host* copy ---------------------------------------
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: BlockKey) -> bool:
         return key in self._slot
 
     def __len__(self) -> int:
@@ -70,7 +79,8 @@ class HostTier:
     def free_slots(self) -> int:
         return len(self._free)
 
-    def store(self, key, kv_caches, block_id: int) -> int:
+    def store(self, key: BlockKey, kv_caches: Sequence[torch.Tensor],
+              block_id: int) -> int:
         """Copy one GPU block out to the host, and remember where it went.
 
         Storing a key that is already held overwrites it in place rather than
@@ -91,7 +101,8 @@ class HostTier:
         self.stores += 1
         return slot
 
-    def load(self, key, kv_caches, block_id: int) -> None:
+    def load(self, key: BlockKey, kv_caches: Sequence[torch.Tensor],
+             block_id: int) -> None:
         """Copy a held block back into `block_id`, which may be anywhere.
 
         The destination is deliberately unconstrained: a pager that had to
@@ -106,16 +117,16 @@ class HostTier:
         torch.cuda.synchronize()
         self.loads += 1
 
-    def release(self, key) -> None:
+    def release(self, key: BlockKey) -> None:
         slot = self._slot.pop(key, None)
         if slot is not None:
             self._free.append(slot)
 
-    def release_request(self, req_id) -> None:
+    def release_request(self, req_id: str) -> None:
         for key in [k for k in self._slot if k[0] == req_id]:
             self.release(key)
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         return {"slots": self.num_slots, "held": len(self._slot),
                 "free": len(self._free), "stores": self.stores,
                 "loads": self.loads,
