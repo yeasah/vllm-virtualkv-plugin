@@ -236,6 +236,36 @@ taken below 5k tokens, which `sink-mass` shows is the regime least
 favourable to scoring; 32 KiB/token puts 128k within 4 GiB, so the regime
 where the recency-vs-oracle gap actually opens becomes reachable on one card.
 
+### Working on a hybrid, 2026-09-06
+
+`tools/quality.py` on Qwen3.5-9B-exl3, 16k context, 31 blocks of 528 tokens,
+budget 8 (~26% residency), needle at block 10, V2 runner forced:
+
+| arm | needle | transfers |
+|---|---|---|
+| off | found | reference |
+| `full` | found, **bit-identical** | — |
+| `recency` | lost, diverges at step 3 | 23 out |
+| `quest` | lost; **did not select the needle block** | 24 out, 2 in |
+| **`oracle`** | **found** | 23 out |
+| `oracle_late` | lost | 24 out, 1 in |
+
+Zero guard violations on every arm.
+
+**Coarse blocks do not break selection.** An oracle finds the needle at
+528-token granularity, which is the same shape as the original 16-token
+result on Llama-3.2-1B: the mechanism can deliver and the policy cannot. The
+33x granularity change is a real problem for budget arithmetic and for host
+tier sizing -- both now fixed -- but it is not fatal to block-based
+residency, and the earlier alarm here was overstated.
+
+**And the whole stack works on a hybrid**: spec patch, group resolution
+across four groups with mamba state interleaved in `kv_caches`, view
+application, guard, host tier, transport, all against an EXL3 checkpoint.
+
+`quest` failing to select the needle block is unchanged from the dense model,
+so the policy gap is not an artifact of the earlier setup.
+
 ### First contact, 2026-09-06
 
 Partly working, with three blockers found by running it.
