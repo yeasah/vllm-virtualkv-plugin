@@ -1,2 +1,0 @@
-[vllm.general_plugins]
-virtualkv = vllm_virtualkv:register
