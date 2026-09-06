@@ -120,11 +120,44 @@ scored policy is now 42% better on mass at a transport cost in the same order
 rather than ten times it. The trend had not turned at 0.05, so the optimum may
 be lower and is untested.
 
-**The accuracy column still disagrees and is still not evidence.** 0/8 against
-recency's 3/8, on a model that manages 3/8 with the whole context, at n=8. It
-is the measure that matters and it is not moving the right way; it is also far
-too noisy here to read. Resolving that needs a model that can do the task and
-more turns than this.
+**On a model that can do the task, recency wins.** Qwen3-8B-AWQ, GSM8K as 12
+turns, budget 12 of ~90 blocks (13% resident), prefix caching on:
+
+| arm | correct | moved |
+|---|---|---|
+| no plugin | 11/12 | — |
+| churn | 11/12, bit-identical | 41335 / 41020 |
+| **recency** | **10/12** | 1136 / 0 |
+| quest | 8/12 | 1589 / 441 |
+
+At 13% residency both policies keep nearly all of it, and the scored one is
+two answers *worse*. That is a real negative result for the current scoring,
+and it is also close to the least informative task for the question: GSM8K
+needs the exemplars at the start and the question and reasoning at the end, and
+nothing in between, which is precisely what recency keeps for free. The harness
+was chosen for being mechanism-sensitive and policy-insensitive; it is
+behaving as designed and cannot show a scored policy's advantage.
+
+What can, and does, is the needle: quest selects the block holding a planted
+answer and recency does not. **The task that would settle it needs both** --
+distant retrieval *and* generations long enough for a query-aware policy to
+act. Neither harness here is that, and building one is the next thing.
+
+**A recency floor under the scored policy is not optional.** Without one quest
+scored 0/12; with half the budget reserved for the newest blocks it scored
+8/12. Attention is heavily recency-weighted and a generation has to see what it
+just wrote; a pure ranking has no floor under that. `recent` now defaults to
+half the budget.
+
+**The measurement bug that produced two rounds of wrong conclusions.** The
+answer extractor matched a trailing period, so `"18."` was scored wrong against
+a gold `"18"`. It was not uniform across arms -- it penalised whichever arm's
+output happened to end with a period -- which is exactly the shape of a
+difference that reads as a result. Under it, recency read 6/12 instead of
+10/12, quest read 0/12 instead of 8/12, and the recency-floor sweep read
+0/0/1/1 instead of 0/0/6/8. Conclusions drawn and then withdrawn: that quest
+was catastrophically worse than recency, and that a recency floor barely
+helped. Both were artifacts. Nothing was wrong with the plugin.
 
 **The earlier comparison, kept because it is what the smoothing fixed.**
 GSM8K as 8 turns, budget 12 blocks:

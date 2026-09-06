@@ -414,7 +414,14 @@ class WorkerPager:
             return
         self.ranked += 1
         sink = self.config.sink if self.config else 0
+        recent = self.config.recent if self.config else 0
         keep = list(range(min(sink, n_full)))
+        # A floor under the newest blocks, reserved before anything is scored.
+        # Without it a ranking is free to drop the context a generation is
+        # actively building on, which is cheap in average attention mass and
+        # ruinous in answers.
+        if recent:
+            keep += [i for i in range(max(0, n_full - recent), n_full)]
         unknown = [i for i in range(n_full)
                    if (req_id, i) not in self.scorer.bounds]
         self.unscored += len(unknown)

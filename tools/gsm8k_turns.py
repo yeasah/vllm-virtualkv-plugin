@@ -22,7 +22,16 @@ context the first time two arms disagreed, and every turn after that would be
 comparing different conversations rather than different residency -- the same
 trap that makes generated-token comparison a bad instrument.
 
-    tools/gsm8k_turns.py MODEL [--turns 24] [--budget 25%] [--shots 4]
+**`--chat` renders the conversation with the model's own template**, and for
+anything modern that is the mode that matters. Two reasons, neither cosmetic:
+instruction-tuned models degenerate on raw completion prompts in ways that have
+nothing to do with residency, and a *thinking* model puts most of its decode
+tokens in a reasoning trace -- which is the bulk of what a pager has to serve
+during generation, and is absent entirely from a few-shot completion. A
+residency policy measured without it is measured on the wrong token
+distribution.
+
+    tools/gsm8k_turns.py MODEL [--turns 24] [--budget 25%] [--shots 4] [--chat]
 """
 
 from __future__ import annotations
@@ -47,13 +56,47 @@ ENV = {
 }
 
 
+def render(tok, messages, thinking: bool) -> str:
+    """Apply the chat template, asking for thinking only where that is a thing.
+
+    `enable_thinking` is a Qwen-ism rather than a standard, so it is offered
+    and withdrawn if the template does not take it -- guessing from the
+    template's text would be its own small bug.
+    """
+    try:
+        return tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=thinking)
+    except TypeError:
+        return tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+
+
 def gold_of(answer: str) -> str:
-    return answer.split("####")[-1].strip().replace(",", "")
+    return _normalise(answer.split("####")[-1].strip().replace(",", ""))
 
 
 def predicted(text: str) -> str | None:
+    """The last number in the answer, normalised the way the gold one is.
+
+    The trailing dot matters: a regex ending in an optional dot happily matches "18." at the end of a
+    sentence, and comparing that against a gold "18" as strings scores a
+    correct answer wrong. It did, on this harness, and the resulting accuracy
+    column was wrong per-arm rather than uniformly -- an arm whose model
+    happened to end with a period was penalised against one that did not, which
+    is exactly the shape of a difference that gets mistaken for a result.
+    """
     hits = re.findall(r"-?\d[\d,]*\.?\d*", text.replace(",", ""))
-    return hits[-1] if hits else None
+    if not hits:
+        return None
+    return _normalise(hits[-1])
+
+
+def _normalise(value: str) -> str:
+    value = value.strip().rstrip(".")
+    if value.endswith(".0"):
+        value = value[:-2]
+    return value
 
 
 def one_arm(args):
@@ -85,13 +128,23 @@ def one_arm(args):
               gpu_memory_utilization=args.util, enforce_eager=True,
               enable_prefix_caching=True, max_num_seqs=1,
               trust_remote_code=True)
-    params = SamplingParams(temperature=0.0, max_tokens=args.max_tokens,
-                            logprobs=5, stop=["\n\n", "Question:"])
+    tok = llm.get_tokenizer()
+    params = SamplingParams(
+        temperature=0.0, max_tokens=args.max_tokens, logprobs=5,
+        stop=None if args.chat else ["\n\n", "Question:"])
 
+    # In chat mode the turns are real messages and the template does the
+    # framing; the gold answer still stands in for the model's own, so every
+    # arm sees one conversation.
+    messages: list[dict] = []
     turns, context = [], shots
     for t in range(args.turns):
         item = test[t]
-        prompt = context + f"Question: {item['question']}\nAnswer:"
+        if args.chat:
+            messages.append({"role": "user", "content": item["question"]})
+            prompt = render(tok, messages, args.thinking)
+        else:
+            prompt = context + f"Question: {item['question']}\nAnswer:"
         out = llm.generate([prompt], params)[0]
         text = out.outputs[0].text
         turns.append({
@@ -103,7 +156,10 @@ def one_arm(args):
             "prompt_chars": len(prompt),
         })
         # The gold answer, not the model's: every arm must see one conversation.
-        context = prompt + f" {item['answer']}\n\n"
+        if args.chat:
+            messages.append({"role": "assistant", "content": item["answer"]})
+        else:
+            context = prompt + f" {item['answer']}\n\n"
 
     result = {"turns": turns}
     if made:
@@ -127,6 +183,10 @@ def main():
     ap.add_argument("--max-len", type=int, default=8192)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--chat", action="store_true",
+                    help="render turns with the model's chat template")
+    ap.add_argument("--thinking", action="store_true",
+                    help="let a thinking model think, in chat mode")
     ap.add_argument("--audit", action="store_true")
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--out", default="")
@@ -149,6 +209,8 @@ def main():
                    "--max-tokens", str(args.max_tokens),
                    "--util", str(args.util),
                    *(["--audit"] if args.audit else []),
+                   *(["--chat"] if args.chat else []),
+                   *(["--thinking"] if args.thinking else []),
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if proc.returncode != 0:
@@ -164,7 +226,9 @@ def report(arms, args):
     ref = arms["off"]["turns"]
     n = len(ref)
     base_hits = [t["pred"] == t["gold"] for t in ref]
-    print(f"\n{args.model}  {n} turns, {args.shots} shots, budget "
+    mode = "chat" + (" +thinking" if args.thinking else "") if args.chat \
+        else f"{args.shots}-shot completion"
+    print(f"\n{args.model}  {n} turns, {mode}, budget "
           f"{args.budget}, prefix caching on")
     print(f"  context grows to {ref[-1]['prompt_chars']} chars\n")
     for name in ARMS:

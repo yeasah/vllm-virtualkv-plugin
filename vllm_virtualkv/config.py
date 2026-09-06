@@ -74,7 +74,7 @@ class Config:
 
     def __init__(self, budget=0, sink=2, policy="recency", host_slots=None,
                  verify=True, show_pending=False, head_agg="max",
-                 layer_agg="max", audit=False, score_decay=0.05):
+                 layer_agg="max", audit=False, score_decay=0.05, recent=None):
         #: (kind, value) until an engine exists; `budget_blocks` after.
         self.budget_spec = parse_budget(budget)
         #: Whole blocks. Only meaningful once `resolve` has run, except when
@@ -106,6 +106,12 @@ class Config:
         #: model wanted was resident. Far slower than what it measures; for a
         #: measurement run, never for serving.
         self.audit = audit
+        #: Blocks at the end of the context a scored policy keeps regardless
+        #: of what it scores them. Attention is heavily recency-weighted and a
+        #: generation must see its own recent output; a pure ranking has no
+        #: floor under that and can drop it, which cost every answer on a model
+        #: able to get them right. Reserved before scoring, like the sinks.
+        self.recent = recent
         #: See QuestScorer.decay. 1.0 reproduces per-step ranking. The default
         #: is the best point of a measured sweep rather than a guess, and the
         #: trend had not turned there, so the optimum may be lower still.
@@ -137,6 +143,7 @@ class Config:
             layer_agg=get("LAYER_AGG", "max", str),
             audit=get("AUDIT", False, lambda x: x not in ("0", "false", "no")),
             score_decay=get("SCORE_DECAY", 0.05, float),
+            recent=get("RECENT", None, int),
         )
         cfg.validate()
         return cfg
@@ -144,6 +151,12 @@ class Config:
     def resolve(self, vllm_config) -> int:
         """Fix the budget in blocks, once the engine can say how big one is."""
         self.budget = resolve_budget(self.budget_spec, vllm_config)
+        if self.recent is None:
+            # Half the budget, because a scored policy without a floor under
+            # the newest blocks scored 0/12 where the same policy with one
+            # scored 8/12. Not a tuning preference: attention is heavily
+            # recency-weighted and a generation has to see what it just wrote.
+            self.recent = max(1, self.budget // 2) if self.budget else 0
         if self.budget and self.sink > self.budget:
             raise ValueError(
                 f"sink ({self.sink}) exceeds the resolved budget "
@@ -159,6 +172,8 @@ class Config:
         return f"{value:g} blocks"
 
     def validate(self) -> None:
+        if self.recent is not None and self.recent < 0:
+            raise ValueError("recent must be non-negative")
         if not 0 < self.score_decay <= 1.0:
             raise ValueError(
                 f"score_decay must be in (0, 1], not {self.score_decay}")
