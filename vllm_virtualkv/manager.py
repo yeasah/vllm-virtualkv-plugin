@@ -136,6 +136,8 @@ class PagedAttentionManager:
         self.blocks_freed = 0
         self.blocks_restored = 0
         self.evictions_refused = 0
+        #: eviction choices declined because another request holds the block
+        self.shared_kept = 0
         self.state = pager_state.current()
 
     # -- the per-step hook -------------------------------------------------
@@ -197,8 +199,21 @@ class PagedAttentionManager:
         resident = set(self.policy.resident(n_full, processed_computed_tokens))
 
         null_id = self._null_block.block_id
+        # A block another request also holds -- a prefix-cache hit shared with
+        # a live request -- is not worth evicting and is worth less than
+        # nothing. Freeing it returns no memory, because `free_blocks` only
+        # queues a block when its ref count reaches zero; it costs a host slot;
+        # and restoring it allocates a *fresh* block, so a block that was
+        # shared comes back private and the total goes **up**. Keeping it is
+        # free: someone else is paying for it either way.
         drop = {i for i in range(n_full)
-                if i not in resident and blocks[i].block_id != null_id}
+                if i not in resident and blocks[i].block_id != null_id
+                and blocks[i].ref_cnt <= 1}
+        self.shared_kept += sum(
+            1 for i in range(n_full)
+            if i not in resident and blocks[i].block_id != null_id
+            and blocks[i].ref_cnt > 1
+        )
         want = {i for i in resident if blocks[i].block_id == null_id}
 
         self.pending_evictions[request_id] = drop

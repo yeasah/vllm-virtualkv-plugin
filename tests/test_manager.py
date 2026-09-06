@@ -304,3 +304,36 @@ def test_restored_blocks_land_at_their_own_indices():
     assert not (set(want) & set(null_positions(mgr, "r"))), (
         "a restored index is still null"
     )
+
+
+def test_a_block_another_request_holds_is_not_evicted():
+    """Evicting a shared block frees nothing and costs a block on restore.
+
+    `free_blocks` only queues a block once its ref count reaches zero, so
+    evicting one that a second request holds returns no memory at all. It still
+    consumes a host slot, and the restore allocates a fresh block -- so a block
+    that was shared between two requests comes back as a private copy and the
+    total goes up. The condition needs real prefix sharing to arise, which is
+    to say it needs real traffic.
+    """
+    mgr, pool = make_manager(budget=8)
+    blocks = give_blocks(mgr, pool, "r", 20)
+
+    shared = [b for i, b in enumerate(blocks) if 2 <= i < 6]
+    for b in shared:
+        b.ref_cnt += 1                     # a second request hits this prefix
+
+    free_before = pool.get_num_free_blocks()
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
+    mgr.remove_skipped_blocks("r", processed_computed_tokens=20 * BLOCK)
+
+    nulls = set(null_positions(mgr, "r"))
+    assert not (nulls & {2, 3, 4, 5}), (
+        f"evicted shared blocks {sorted(nulls & {2, 3, 4, 5})}: no memory was "
+        f"returned and the restore will make private copies of them"
+    )
+    assert mgr.shared_kept > 0, "the skip was not exercised"
+    # Everything freed was genuinely returned.
+    assert pool.get_num_free_blocks() == free_before + len(nulls)
+    for b in shared:
+        assert b.ref_cnt == 2, "a shared block's ref count was disturbed"

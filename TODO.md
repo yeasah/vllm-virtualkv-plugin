@@ -41,6 +41,16 @@ Patching the check alone is not enough; see below.
 
 ## `prefill-residency` — the peak this does not touch
 
+**Prefix hits shorten this considerably**, which was not obvious. Cache-hit
+tokens never go through a prefill forward — `num_computed_tokens` jumps to the
+hit length — so the guard here (`processed < num_prompt_tokens`) clears almost
+at once and paging starts nearly immediately. Over a multi-turn session with a
+high hit rate the genuinely-prefilled portion is small, and the peak is set by
+the first cold turn rather than by the running context. Keeping any single
+prompt under the KV capacity therefore buys most of what prefill residency
+would, without building it.
+
+
 Paging is decode-only (README, "Limits"). That bounds the *steady-state* decode
 footprint, and the blocks genuinely return to the pool, so a workload of many
 long generations really does hold less. What it does not do is let a request
@@ -103,6 +113,19 @@ That is consistent with the argument the design made and never tested: a pager
 whoever holds it. A request that evicts a block still owns those tokens; the
 pool may hand the block to someone else under its hash, and both are right,
 because our copy comes back from the host rather than from that block.
+
+One consequence of caching turned out to be a rule rather than a caveat, and
+is now implemented: **a block another live request holds is never evicted.**
+`free_blocks` only queues a block once its ref count reaches zero, so freeing a
+shared one returns no memory at all, while still costing a host slot — and the
+restore allocates a fresh block, so a block that was shared between two
+requests comes back as a private copy and the total goes *up*. Keeping it is
+free, because someone else is paying for it either way. It needs genuine
+prefix sharing to arise, which is to say it needs real traffic.
+
+That also sharpens what a budget means: a request holding a shared block is not
+spending its budget on it in any sense that matters, so residency accounting
+should eventually be per-block-refcount rather than per-request. Not done.
 
 Not settled. Churn only hides a block for a single step, and the recency arm
 has no exact reference to be judged against — it changes the output on purpose.
