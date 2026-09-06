@@ -277,11 +277,33 @@ plugin thinks in:
 - residency granularity coarsens by the same factor, which cuts against the
   9x improvement in the union. Which dominates is unmeasured.
 
-**Blocker 3: an OOM kill (exit 137) when the plugin is enabled**, on the
-needle test. Not attributed: KV sizing was byte-identical with and without the
-plugin, the engine finished initialising, and the machine had 10 of 11 GB of
-swap in use after a long day of back-to-back vLLM runs. Retry on a clean box
-before treating it as a plugin bug.
+**Blocker 3: a reproducible OOM kill (exit 137) when the plugin is enabled.**
+`tools/quality.py` on the hybrid dies with ~17.9 GB of `shmem-rss` (kernel
+log), and it reproduces with 20 GB free and no swap pressure — an earlier
+guess that this was environmental is **wrong** and was withdrawn.
+
+What is known:
+
+- GPU KV sizing is byte-identical with and without the plugin (0.98 GiB,
+  16,102 tokens), and the engine finishes initialising. So it is host-side.
+- The host tier is *not* the cause: instrumented at **1 slot, 16.5 MiB,
+  0.02 GiB total**. Its `pin_memory=True` is page-locked and so unswappable,
+  which makes it an aggravator under pressure but nowhere near 17 GB.
+- A minimal script with the plugin enabled on the same model runs clean.
+
+What differs between the clean run and the failing one, none yet isolated:
+`gpu_memory_utilization` 0.85 vs **0.55**, prefix caching on vs **off**, and
+`max_model_len` fixed 2048 vs derived from the prompt. Bisect these first.
+
+The suspicion worth testing: the paged spec subclass may perturb the
+attention/mamba page-size equalisation (`interface.py` pads the mamba page to
+match), and `PagedAttentionSpec.merge` has already once dropped fields because
+the base rebuilds from an explicit list. A wrong page size would not change
+the reported GPU total while still making something host-side enormous.
+
+**A reporting weakness that cost time here**: `quality.py` prints
+`stdout[-1500:]` and `stderr[-2500:]` on failure, which are blank when a run
+ends in progress-bar output, so it reports "arm failed" and shows nothing.
 
 **Still to do regardless: make the hook verify it *fired*.** `install()`
 checks that it patched something; nothing checks that it ran. Three separate
