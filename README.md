@@ -36,8 +36,26 @@ The mechanism is not the limit; the policy is.
 
 `recency` losing it is not a defect, it is what recency *is*: its window only
 slides forward, so it never asks for a block back and its fetch rate is zero
-after warm-up. That is StreamingLLM — useful, shippable, and the baseline a
-scoring policy has to beat. It also means the restore path, the entire
+after warm-up. That is StreamingLLM — and **it is not the baseline a scoring
+policy has to beat, because it is not a baseline at all**. Measured against a
+`truncate` arm that runs no plugin and simply cuts the prompt to the same
+tokens, on a real session at 33% residency:
+
+| arm | agreement | drift | turns identical |
+|---|---|---|---|
+| truncate (no plugin, shorter prompt) | 0.4565 | **0.0016** | **4/10** |
+| recency | 0.4606 | 0.0045 | 2/10 |
+| quest | 0.4296 | 0.0054 | 2/10 |
+
+Recency *is* truncation, and truncation is slightly better on the sensitive
+measures. The whole apparatus buys nothing over a shorter prompt there. The
+bar is beating truncation, and nothing here does it yet outside the needle.
+
+That is a statement about the workload as much as the policy: the session is
+chained four-turn conversations, so a 2048-token window holds the entire
+current topic and nothing distant is required. A harness cannot reward keeping
+context it never needs. The condition under which paging can pay is distant
+retrieval — which is exactly what the needle has and this does not. It also means the restore path, the entire
 difference between paging and eviction, is exercised by the tests and not by
 the default policy.
 

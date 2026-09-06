@@ -210,6 +210,48 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `proxy-is-broken` — mass capture ordered the policies backwards
+
+The demand-signal work optimises attention mass captured. End to end, on a
+real session at budget 64, more mass capture produced *worse* output:
+
+| arm | mass captured | token agreement |
+|---|---|---|
+| recency | 0.274 | 0.1427 |
+| quest (bounds) | 0.664 | 0.0982 |
+| massoracle (measured mass, the ceiling) | 0.872 | 0.0621 |
+
+`massoracle` reconstructs every block's true attention mass each step and
+ranks on it, so no estimator can do better. It was the worst arm. A recency
+floor sweep under it confirms the direction: agreement climbs as the floor
+grows, and the best mixture (0.1368) still loses to pure recency (0.1427).
+Every block spent on mass-ranked selection would have been better spent
+extending the recent window.
+
+Two candidate explanations, and they want different fixes:
+
+1. **Holes are out of distribution.** A contiguous recent window is a shorter
+   conversation; a mass-ranked set has gaps at positions matching nothing the
+   model was trained on. If so, sparse residency carries an intrinsic penalty
+   no selector avoids, and this is a problem for every non-contiguous scheme.
+2. **The workload never needs distant context**, so keeping it cannot pay and
+   only the damage is visible. The `truncate` result below supports this one.
+
+Not settled. Distinguishing them needs a task that genuinely requires distant
+content -- see `capability-suite`, which this now blocks on.
+
+## `truncation-is-the-baseline` — recency is not a policy
+
+`recency` matches a plugin-free `truncate` arm that cuts the prompt to the
+same tokens (0.4606 vs 0.4565 agreement) and *loses* on drift (0.0045 vs
+0.0016) and exact turns (2/10 vs 4/10). So the host tier, block-table
+rewriting and guard buy nothing over a shorter prompt at 33% residency on
+this session.
+
+Everything this repo has compared against recency has therefore been
+comparing against truncation without saying so. The bar is truncation, and
+only the needle test clears it.
+
 ## `capability-suite` — the harness that could actually judge a policy
 
 Neither existing harness can. The needle needs distant retrieval but answers in
