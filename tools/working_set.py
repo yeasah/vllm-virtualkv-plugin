@@ -32,6 +32,9 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=96)
     ap.add_argument("--max-len", type=int, default=16384)
     ap.add_argument("--util", type=float, default=0.75)
+    ap.add_argument("--thinking", action="store_true",
+                    help="let a thinking model think, which is where the "
+                         "decode tokens actually are")
     args = ap.parse_args()
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -69,7 +72,7 @@ def main() -> int:
         if msg["role"] != "user" or i + 1 >= len(session):
             continue
         messages.append({"role": "user", "content": msg["content"]})
-        prompt = render(tok, messages, False)
+        prompt = render(tok, messages, args.thinking)
         if len(tok(prompt).input_ids) + args.max_tokens > args.max_len:
             break
         llm.generate([prompt], params)
