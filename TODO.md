@@ -90,6 +90,35 @@ question from retrieval, where the signal sits in a few query heads and
 averaging dilutes it. The layer-wise choice made no difference either way,
 which leaves the all-layer union looking less fatal than feared.
 
+**The metric to refine against now exists.** `audit.py` recomputes attention
+each step from the true keys -- resident ones from the GPU, evicted ones from
+the host tier, which an eviction method could never do -- and reports the mass
+that sat in blocks the policy did not have. Transfer counters cannot
+distinguish a policy that fetches well from one that fetches constantly;
+`missed_mass`, `fetched_mass` and `evicted_mass` can.
+
+**First comparison, and it is not a win.** GSM8K as 8 turns, budget 12 blocks:
+
+| policy | missed mass | worst layer | fetched mass | moved | correct |
+|---|---|---|---|---|---|
+| recency | 0.0121 | 0.415 | 0.0000 | 460 out, 0 in | 3/8 |
+| quest | **0.0097** | 0.427 | 0.0118 | 4747 out, **4289 in** | **0/8** |
+
+The scored policy captures about 20% more attention mass and does *worse* on
+the task, at ten times the transport. Three things to take from that, none of
+them "quest is bad":
+
+- **The proxy moved the right way and the outcome moved the wrong way.** Mass
+  captured has always been a proxy for quality rather than a measurement of it;
+  this is the first time the two have been observed disagreeing here, and it is
+  the reason the end-to-end harness exists.
+- **n is 8, on a model that scores 3/8 at full context.** The accuracy column
+  is not evidence of much. The mass column, over 911 audited steps, is.
+- **Nothing bounds the fetching**, and it shows: 4289 restores over 911 steps
+  is ~4.7 blocks per step, which at the measured transport cost is real latency
+  spent for a proxy improvement of 0.0024. The fetch ceiling stops being a
+  future refinement here and becomes the next thing to build.
+
 What is not yet known:
 
 1. **Whether it beats recency on anything but a planted needle.** One block,
@@ -102,10 +131,14 @@ What is not yet known:
 3. **Whether one step of staleness is enough** at real generation lengths.
    `ranked` counts how often a ranking was available and it is low on short
    runs.
-4. **A fetch ceiling.** Nothing bounds how much a ranking may pull per step,
-   and the transport measurement says that is the quantity that matters.
+4. **A fetch ceiling**, now measured as the pressing gap rather than a
+   theoretical one -- see the churn figures above.
+5. **Whether the instability is the problem.** Quest re-ranks every step and
+   the resident set moves with it; recency's set is stable. A policy that
+   thrashes may lose more to disruption than it gains in mass, which the
+   current metrics cannot separate. A "set churn per step" figure would.
 
-## `demand-signal-old` — superseded, kept for the shape of the argument
+
 
 `recency` never fetches; its window only slides forward. At 12% residency an
 oracle reproduces the full-context answer token for token and recency loses it

@@ -44,6 +44,7 @@ import torch
 from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
+from .audit import audit_step
 from .quest import QueryCapture, QuestScorer
 
 if TYPE_CHECKING:
@@ -106,9 +107,14 @@ class WorkerPager:
         self.capture: QueryCapture | None = None
         self.ranked: int = 0
         self.unscored: int = 0
+        #: steps where last step's queries were not available to rank with
+        self.no_queries: int = 0
         #: the last set the scorer chose, kept for inspection because the
         #: shared state drops it the moment the request finishes
         self.last_selection: list[int] = []
+        #: per-step attention-mass audit, when config.audit is on
+        self.audit_rows: list[dict] = []
+        self._last_view: dict = {}
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -228,7 +234,8 @@ class WorkerPager:
             self.host_slots = slots
             self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
-            if self.config is not None and self.config.policy == "quest":
+            if self.config is not None and (self.config.policy == "quest"
+                                            or self.config.audit):
                 spec = runner.kv_cache_config.kv_cache_groups[0].kv_cache_spec
                 self.scorer = QuestScorer(
                     head_size=spec.head_size, head_size_v=spec.head_size_v,
@@ -236,6 +243,7 @@ class WorkerPager:
                     layer_agg=self.config.layer_agg)
                 self.capture = QueryCapture()
                 self.capture.install(runner.model)
+                self._spec = spec
 
     def apply(self, runner: GPUModelRunner, batch: InputBatch,
               prepared: PreparedAttn) -> None:
@@ -247,6 +255,8 @@ class WorkerPager:
             # This forward's queries have not happened yet; what is held is the
             # previous one's, which is what the ranking is allowed to use.
             self.capture.rotate()
+            if self.config is not None and self.config.audit:
+                self._audit_previous(runner)
         self._release_finished()
         table = block_tables[0]
         slots = slot_mappings[0] if slot_mappings is not None else None
@@ -313,6 +323,15 @@ class WorkerPager:
             seq_len = (len(resident) - 1) * block_size + tail_count
             self._plan[b] = (row, resident, seq_len)
             intended[req_id] = len(resident)
+            if self.config is not None and self.config.audit:
+                self._last_view[req_id] = {
+                    "row": list(row), "row_index": b,
+                    "resident": {i for i in resident if i < computed // block_size},
+                    "n_full": computed // block_size, "block_size": block_size,
+                    "restored": [i for i, _ in step.restored],
+                    "evicted": sorted(step.evicting and
+                                      {i for i, _ in step.evicting} or set()),
+                }
 
         # 4. and check what the kernel is about to be shown. The guard reads
         # the same view the builder will get, built here rather than from the
@@ -383,6 +402,7 @@ class WorkerPager:
 
         queries = self.capture.for_row(row_index) if self.capture else []
         if not queries:
+            self.no_queries += 1
             return
         ranked = self.scorer.rank(req_id, range(n_full), queries)
         if not ranked:
@@ -399,8 +419,33 @@ class WorkerPager:
                 break
             keep.append(index)
         selection = sorted(set(keep))[:max(budget, len(unknown))]
-        self.state.desired[req_id] = selection
         self.last_selection = selection
+        # Only a query-aware *policy* may steer residency. The scorer also runs
+        # under `audit`, which needs its bounds and queries -- and publishing
+        # from there would make switching the measurement on change the thing
+        # being measured, which it did: an audited `recency` run silently
+        # became `quest` and the two reported identical numbers.
+        if self.config is not None and self.config.policy == "quest":
+            self.state.desired[req_id] = selection
+
+    def _audit_previous(self, runner) -> None:
+        """Judge the *previous* step's residency against its own queries.
+
+        Deliberately retrospective. A step's decision has to be scored against
+        the attention it was actually serving, and that query does not exist
+        until the forward it belongs to has run.
+        """
+        for req_id, saved in list(self._last_view.items()):
+            queries = self.capture.for_row(saved["row_index"])
+            row = audit_step(
+                runner.kv_caches, self.tier, req_id, saved["row"],
+                saved["resident"], saved["n_full"], queries,
+                saved["block_size"], self._spec.head_size,
+                self._spec.head_size_v, saved["restored"], saved["evicted"])
+            if row is not None:
+                row["req"] = req_id
+                self.audit_rows.append(row)
+        self._last_view = {}
 
     def _release_finished(self) -> None:
         """Give back the host slots of requests the scheduler has let go.
@@ -442,6 +487,21 @@ class WorkerPager:
                 f"{req_id}: block ids {bad_ids[:4]} are outside a pool of "
                 f"{num_blocks} blocks")
 
+    def _audit_summary(self) -> dict[str, Any] | None:
+        if not self.audit_rows:
+            return None
+        n = len(self.audit_rows)
+        pick = lambda k: sum(r[k] for r in self.audit_rows) / n   # noqa: E731
+        return {
+            "steps": n,
+            "missed_mass": pick("missed"),
+            "worst_layer_missed": max(r["worst_layer"] for r in self.audit_rows),
+            "fetched_mass": pick("fetched_mass"),
+            "evicted_mass": pick("evicted_mass"),
+            "resident_blocks": pick("resident_blocks"),
+            "total_blocks": pick("total_blocks"),
+        }
+
     def summary(self) -> dict[str, Any]:
         out = {"steps": self.steps, "copied_in": self.copied_in,
                "copied_out": self.copied_out,
@@ -450,7 +510,9 @@ class WorkerPager:
                "released": self.released,
                "ranked": self.ranked,
                "unscored": self.unscored,
+               "no_queries": self.no_queries,
                "last_selection": list(self.last_selection),
+               "audit": self._audit_summary(),
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()

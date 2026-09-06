@@ -124,6 +124,12 @@ result that does not say which were active is not evidence:
   because every policy that actually drops context changes the output on
   purpose and has nothing to be compared with. Both are bit-identical to no
   plugin, in tokens *and* logprobs.
+- **the attention audit** (`VLLM_VIRTUALKV_AUDIT=1`) recomputes attention each
+  step from the true keys — resident ones from the GPU, evicted ones from the
+  host tier — and reports the mass that sat in blocks the policy did not have.
+  It is the only honest way to refine a policy: transfer counters cannot tell a
+  policy that fetches well from one that fetches constantly. Far slower than
+  what it measures, and strictly for measurement runs.
 - **transfer counters** — `copied_out`, `copied_in`, `missing_host_copy`,
   `evictions_refused`. The
   guard checks that what happens is *legal*, and a plugin that silently does

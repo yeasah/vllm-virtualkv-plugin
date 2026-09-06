@@ -74,7 +74,7 @@ def one_arm(args):
         # keep it from the very first decision and never restore anything.
         OracleLate.after = len(prompt_ids) + 2
         patch_spec(budget, args.sink, policy,
-                   host_slots=args.host_slots)
+                   host_slots=args.host_slots, audit=args.audit)
 
     # Chunked prefill on purpose. With the whole prompt in one chunk the
     # scheduler makes exactly one residency decision before decoding starts, so
@@ -124,6 +124,8 @@ def main():
     ap.add_argument("--host-slots", type=int, default=1024)
     ap.add_argument("--util", type=float, default=0.55)
     ap.add_argument("--max-batched", type=int, default=512)
+    ap.add_argument("--audit", action="store_true",
+                    help="recompute attention each step to score the policy")
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -144,6 +146,7 @@ def main():
                    "--host-slots", str(args.host_slots),
                    "--util", str(args.util),
                    "--max-batched", str(args.max_batched),
+                   *(["--audit"] if args.audit else []),
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
@@ -170,6 +173,13 @@ def main():
         extra = ""
         if p.get("ranked"):
             extra = (f"  ranked {p['ranked']} unscored {p.get('unscored', 0)}")
+        au = p.get("audit")
+        if au:
+            print(f"           mass missed {au['missed_mass']:.3f} "
+                  f"(worst layer {au['worst_layer_missed']:.3f})  "
+                  f"fetched {au['fetched_mass']:.3f}  "
+                  f"evicted {au['evicted_mass']:.3f}  over "
+                  f"{au['resident_blocks']:.0f}/{au['total_blocks']:.0f} blocks")
         if a.get("selection_size"):
             extra += (f"  selected needle block: "
                       f"{'YES' if a['selected_needle'] else 'no'} "

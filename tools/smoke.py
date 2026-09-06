@@ -44,7 +44,8 @@ from vllm_virtualkv import state as pager_state  # noqa: E402
 PAGER = []
 
 
-def patch_spec(budget, sink, policy, show_pending=False, host_slots=None):
+def patch_spec(budget, sink, policy, show_pending=False, host_slots=None,
+               audit=False):
     """Install exactly the way the plugin's entry point does.
 
     Not a shortcut around `enable`: constructing a `WorkerPager` by hand is how
@@ -55,7 +56,8 @@ def patch_spec(budget, sink, policy, show_pending=False, host_slots=None):
     from vllm_virtualkv.integration import Config, enable
 
     config = Config(budget=budget, sink=sink, policy=policy,
-                    show_pending=show_pending, host_slots=host_slots)
+                    show_pending=show_pending, host_slots=host_slots,
+                    audit=audit)
     config.validate()
     _cfg, pager, original = enable(config)
     PAGER.append(pager)

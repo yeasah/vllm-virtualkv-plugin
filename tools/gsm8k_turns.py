@@ -37,9 +37,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-ARMS = ("off", "churn", "recency")
+ARMS = ("off", "churn", "recency", "quest")
 ENV = {
     "off": {"VLLM_VIRTUALKV": "0"},
+    "quest": {"VLLM_VIRTUALKV": "1", "VLLM_VIRTUALKV_POLICY": "quest"},
     "churn": {"VLLM_VIRTUALKV": "1", "VLLM_VIRTUALKV_POLICY": "churn",
               "VLLM_VIRTUALKV_SHOW_PENDING": "1"},
     "recency": {"VLLM_VIRTUALKV": "1", "VLLM_VIRTUALKV_POLICY": "recency"},
@@ -78,6 +79,8 @@ def one_arm(args):
         for i in range(args.shots)
     )
 
+    if args.audit:
+        os.environ["VLLM_VIRTUALKV_AUDIT"] = "1"
     llm = LLM(model=args.model, max_model_len=args.max_len,
               gpu_memory_utilization=args.util, enforce_eager=True,
               enable_prefix_caching=True, max_num_seqs=1,
@@ -124,6 +127,7 @@ def main():
     ap.add_argument("--max-len", type=int, default=8192)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--audit", action="store_true")
     ap.add_argument("--arm", choices=ARMS)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -143,7 +147,9 @@ def main():
                    "--turns", str(args.turns), "--shots", str(args.shots),
                    "--max-len", str(args.max_len),
                    "--max-tokens", str(args.max_tokens),
-                   "--util", str(args.util), "--arm", name, "--out", path]
+                   "--util", str(args.util),
+                   *(["--audit"] if args.audit else []),
+                   "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if proc.returncode != 0:
                 print(proc.stdout[-1500:], proc.stderr[-2500:])
@@ -171,6 +177,13 @@ def report(arms, args):
         g = arms[name].get("guard", {})
         print(f"  {name:8s} {sum(hits):2d}/{n} correct"
               f"   {'bit-identical' if lp_exact else 'tokens identical' if exact else f'{flips} turn(s) flipped'}")
+        au = p.get("audit")
+        if au:
+            print(f"           mass missed {au['missed_mass']:.4f}  worst layer "
+                  f"{au['worst_layer_missed']:.3f}  fetched "
+                  f"{au['fetched_mass']:.4f}  evicted {au['evicted_mass']:.4f}"
+                  f"  over {au['steps']} steps, "
+                  f"{au['resident_blocks']:.0f}/{au['total_blocks']:.0f} blocks")
         if p:
             print(f"           out {p.get('copied_out', 0):5d} in "
                   f"{p.get('copied_in', 0):5d}  unbacked "
