@@ -41,12 +41,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from harness import answered, needle_prompt  # noqa: E402
 from harness import capture, compare, haystack  # noqa: E402
-from vllm_virtualkv import WorkerPager, state as pager_state  # noqa: E402
+from vllm_virtualkv import state as pager_state  # noqa: E402
 from vllm_virtualkv.policy import Oracle, OracleLate  # noqa: E402
-from smoke import patch_spec  # noqa: E402
+from smoke import PAGER, patch_spec  # noqa: E402
 
 VALUE = 918273
-ARMS = ("off", "full", "recency", "oracle", "oracle_late")
+ARMS = ("off", "full", "recency", "quest", "oracle", "oracle_late")
 
 
 def one_arm(args):
@@ -73,7 +73,8 @@ def one_arm(args):
         # back afterwards. Paging is decode-only, so `after = prompt_len` would
         # keep it from the very first decision and never restore anything.
         OracleLate.after = len(prompt_ids) + 2
-        patch_spec(budget, args.sink, policy)
+        patch_spec(budget, args.sink, policy,
+                   host_slots=args.host_slots)
 
     # Chunked prefill on purpose. With the whole prompt in one chunk the
     # scheduler makes exactly one residency decision before decoding starts, so
@@ -88,15 +89,23 @@ def one_arm(args):
               trust_remote_code=True)
     pager = None
     if args.arm != "off":
-        pager = WorkerPager(host_slots=args.host_slots,
-                            scheduler=llm.llm_engine.engine_core.engine_core.scheduler)
-        pager.install()
+        pager = PAGER[-1]
+        pager.attach_scheduler(
+            llm.llm_engine.engine_core.engine_core.scheduler)
 
     out = llm.generate([{"prompt_token_ids": prompt_ids}],
                        SamplingParams(temperature=0.0, max_tokens=args.tokens,
                                       logprobs=20))[0]
+    # What the policy *chose*, which is what a policy should be judged on.
+    # Whether the answer is right also depends on when it is emitted, and a
+    # needle answer arrives in the first token or two -- before a query-aware
+    # policy has seen a query at all. Selection is the thing that is actually
+    # attributable to the policy.
+    chosen = pager.last_selection if pager is not None else []
     result = {"req": capture(out), "text": out.outputs[0].text,
-              "needle_block": first, "prompt_len": len(prompt_ids)}
+              "needle_block": first, "prompt_len": len(prompt_ids),
+              "selected_needle": first in chosen,
+              "selection_size": len(chosen)}
     if pager is not None:
         result["pager"] = pager.summary()
     with open(args.out, "w") as f:
@@ -158,9 +167,16 @@ def main():
                "bit-identical" if exact else
                "tokens identical" if m["ids_match"] else
                f"diverges at step {m['first_divergence']}")
-        print(f"  {name:8s} needle {'FOUND' if hit else 'lost '}  {tag:24s}"
+        extra = ""
+        if p.get("ranked"):
+            extra = (f"  ranked {p['ranked']} unscored {p.get('unscored', 0)}")
+        if a.get("selection_size"):
+            extra += (f"  selected needle block: "
+                      f"{'YES' if a['selected_needle'] else 'no'} "
+                      f"(of {a['selection_size']} chosen)")
+        print(f"  {name:11s} needle {'FOUND' if hit else 'lost '}  {tag:24s}"
               f"  out {p.get('copied_out', 0):4d} in {p.get('copied_in', 0):4d}"
-              f"  guard {g.get('violations', 0)}")
+              f"  guard {g.get('violations', 0)}{extra}")
         print(f"           {a['text'].strip()[:64]!r}")
 
     ok_full = (arms["full"]["req"]["ids"] == ref["req"]["ids"])
@@ -171,7 +187,24 @@ def main():
     if not hits["off"]:
         print("\n  inconclusive: the model cannot retrieve this needle even "
               "with the whole context, so no arm below says anything")
-    elif hits["oracle"] and not hits["recency"]:
+    q = arms.get("quest", {})
+    if q.get("selection_size"):
+        print(f"\n  quest selected {q['selection_size']} blocks and "
+              f"{'included' if q['selected_needle'] else 'did not include'} "
+              f"the one holding the answer. Selection is the policy's doing; "
+              f"whether the answer survives also depends on the answer "
+              f"arriving after the policy has seen a query, which a needle "
+              f"prompt does not do.")
+    if hits.get("quest") and not hits["recency"]:
+        print("\n  the scored policy found what recency lost -- the demand "
+              "signal works through a real model, and the all-layer union does "
+              "not swallow the sparsity")
+    elif hits["oracle"] and not hits.get("quest", True):
+        print("\n  the mechanism can deliver and the scored policy cannot: "
+              "either the bound is too loose at this budget, or one step of "
+              "staleness is too much, or the union across layers costs more "
+              "than the score buys")
+    if hits["oracle"] and not hits["recency"]:
         print("\n  the mechanism can deliver at this budget and recency cannot "
               "-- the gap is policy, which is the phase to work on next")
         late = arms.get("oracle_late", {}).get("pager", {})

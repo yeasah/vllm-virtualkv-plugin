@@ -67,7 +67,45 @@ request by hash.
 
 Order: prefill residency first, then the startup check, then the knobs.
 
-## `demand-signal` — the policy that makes any of this pay
+## `demand-signal` — scoring exists, and selects the right block
+
+`bounds.py` holds the per-block key ranges, `quest.py` scores them against the
+previous step's queries, and `policy.py` exposes `quest`. The decision travels
+worker to scheduler through the shared state, one step stale, which is the
+protocol step the design predicted from the moment block order was measured: a
+query only exists inside the forward, and residency must be settled before it.
+
+**First result.** At a budget of 16 of 129 blocks, with a needle planted in a
+known block, the scored policy *selects* that block and recency does not. It is
+selection that is measured, not the answer: a needle answer is emitted in the
+first token or two, before a query-aware policy has seen a single query, so no
+such policy can affect it. Any harness meant to judge a scored policy on
+answers has to ask its question late.
+
+**The aggregation was the whole result**, and the default was wrong on import.
+With `head_agg="mean"` the policy missed the block; with `"max"` it found it,
+same budget, same everything. The mean default came from an earlier measurement
+that mean captures more attention *mass* across a GQA group — a different
+question from retrieval, where the signal sits in a few query heads and
+averaging dilutes it. The layer-wise choice made no difference either way,
+which leaves the all-layer union looking less fatal than feared.
+
+What is not yet known:
+
+1. **Whether it beats recency on anything but a planted needle.** One block,
+   one prompt, one model. Selection accuracy against real attention mass is
+   unmeasured.
+2. **What the bounds cost in practice.** Held in fp32 at
+   `num_kv_heads * head_size * 2` per block per layer, which is not a
+   deployable format, and the memory comes out of the same budget the blocks
+   do.
+3. **Whether one step of staleness is enough** at real generation lengths.
+   `ranked` counts how often a ranking was available and it is low on short
+   runs.
+4. **A fetch ceiling.** Nothing bounds how much a ranking may pull per step,
+   and the transport measurement says that is the quantity that matters.
+
+## `demand-signal-old` — superseded, kept for the shape of the argument
 
 `recency` never fetches; its window only slides forward. At 12% residency an
 oracle reproduces the full-context answer token for token and recency loses it

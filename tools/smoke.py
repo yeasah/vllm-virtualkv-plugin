@@ -37,14 +37,29 @@ from dataclasses import fields
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from harness import capture, compare, haystack  # noqa: E402
-from vllm_virtualkv import WorkerPager, state as pager_state  # noqa: E402
+from vllm_virtualkv import state as pager_state  # noqa: E402
 
 
-def patch_spec(budget, sink, policy):
-    """Thin wrapper so the drivers and the plugin install the same way."""
-    from vllm_virtualkv.integration import Config, patch_spec as _patch
+#: Built by `install`, so a driver can attach a scheduler to it afterwards.
+PAGER = []
 
-    return _patch(Config(budget=budget, sink=sink, policy=policy))
+
+def patch_spec(budget, sink, policy, show_pending=False, host_slots=None):
+    """Install exactly the way the plugin's entry point does.
+
+    Not a shortcut around `enable`: constructing a `WorkerPager` by hand is how
+    a driver ends up testing a configuration no deployment can produce -- it
+    was passing `host_slots` and no config, so a query-aware policy silently
+    fell back to recency and reported numbers indistinguishable from it.
+    """
+    from vllm_virtualkv.integration import Config, enable
+
+    config = Config(budget=budget, sink=sink, policy=policy,
+                    show_pending=show_pending, host_slots=host_slots)
+    config.validate()
+    _cfg, pager, original = enable(config)
+    PAGER.append(pager)
+    return original
 
 
 def build(model, args, budget, policy):
@@ -53,7 +68,9 @@ def build(model, args, budget, policy):
     pager_state.reset()
     restore = None
     if budget is not None:
-        restore = patch_spec(budget, args.sink, policy)
+        restore = patch_spec(budget, args.sink, policy,
+                             show_pending=(policy == "churn"),
+                             host_slots=args.host_slots)
     llm = LLM(model=model, max_model_len=args.ctx + args.tokens + 64,
               gpu_memory_utilization=args.util, enforce_eager=True,
               enable_prefix_caching=False, max_num_seqs=1,
@@ -65,9 +82,9 @@ def run_arm(model, args, budget, policy, prompts, params):
     llm, _ = build(model, args, budget, policy)
     pager = None
     if budget is not None:
-        scheduler = llm.llm_engine.engine_core.engine_core.scheduler
-        pager = WorkerPager(host_slots=args.host_slots, scheduler=scheduler)
-        pager.install()
+        pager = PAGER[-1]
+        pager.attach_scheduler(
+            llm.llm_engine.engine_core.engine_core.scheduler)
     outs = llm.generate(prompts, params)
     result = {"reqs": [capture(o) for o in outs]}
     if pager is not None:

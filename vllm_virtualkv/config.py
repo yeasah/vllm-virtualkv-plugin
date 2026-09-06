@@ -73,7 +73,8 @@ class Config:
     PREFIX = "VLLM_VIRTUALKV_"
 
     def __init__(self, budget=0, sink=2, policy="recency", host_slots=None,
-                 verify=True, show_pending=False):
+                 verify=True, show_pending=False, head_agg="max",
+                 layer_agg="max"):
         #: (kind, value) until an engine exists; `budget_blocks` after.
         self.budget_spec = parse_budget(budget)
         #: Whole blocks. Only meaningful once `resolve` has run, except when
@@ -91,6 +92,16 @@ class Config:
         #: number means what it says; on for the churn policy, which depends
         #: on it to keep the context whole.
         self.show_pending = show_pending
+        #: How a block's per-head and per-layer bounds collapse into the one
+        #: number residency is decided on. `head_agg="max"` is not a default
+        #: taken on principle: with `mean` the scored policy failed to select
+        #: the block holding a planted answer and with `max` it selected it,
+        #: at the same budget. Retrieval signal sits in a few query heads and
+        #: averaging over the group dilutes it -- which is the opposite of the
+        #: earlier finding that mean captures more *mass* across a GQA group,
+        #: a different question that this default was wrongly imported from.
+        self.head_agg = head_agg
+        self.layer_agg = layer_agg
 
     @classmethod
     def from_env(cls, env=None) -> "Config":
@@ -114,6 +125,8 @@ class Config:
             verify=get("VERIFY", True, lambda x: x not in ("0", "false", "no")),
             show_pending=get("SHOW_PENDING", False,
                              lambda x: x not in ("0", "false", "no")),
+            head_agg=get("HEAD_AGG", "max", str),
+            layer_agg=get("LAYER_AGG", "max", str),
         )
         cfg.validate()
         return cfg
@@ -136,6 +149,10 @@ class Config:
         return f"{value:g} blocks"
 
     def validate(self) -> None:
+        for name, value in (("head_agg", self.head_agg),
+                            ("layer_agg", self.layer_agg)):
+            if value not in ("max", "mean"):
+                raise ValueError(f"{name} must be 'max' or 'mean', not {value!r}")
         if self.policy == "churn" and not self.show_pending:
             raise ValueError(
                 "policy 'churn' needs show_pending: it depends on reading a "

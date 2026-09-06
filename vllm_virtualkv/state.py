@@ -53,6 +53,11 @@ class PagerState:
 
     def __init__(self) -> None:
         self.steps: dict[str, RequestStep] = {}
+        #: req_id -> the worker's chosen full-block set for the next pass.
+        #: The third thing to travel worker-ward's opposite direction, and the
+        #: one the design predicted from the start: a query-aware policy knows
+        #: something the scheduler cannot compute.
+        self.desired: dict[str, list[int]] = {}
         #: Requests the scheduler has freed, waiting for the worker to let go
         #: of their host copies. The second thing that travels worker-ward's
         #: opposite direction, and it exists because the side that knows a
@@ -70,6 +75,7 @@ class PagerState:
 
     def drop(self, req_id: str) -> None:
         self.steps.pop(req_id, None)
+        self.desired.pop(req_id, None)
         self.finished.add(req_id)
 
     def take_finished(self) -> set[str]:

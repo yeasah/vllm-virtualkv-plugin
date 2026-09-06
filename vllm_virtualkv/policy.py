@@ -232,6 +232,29 @@ class OracleLate(Oracle):
         return super().resident(n_full, num_computed)
 
 
+class Quest:
+    """Residency ranked by an upper bound on each block's attention score.
+
+    The scoring happens on the worker (see `quest.py`); this class exists so
+    the manager has something to fall back on before the first ranking arrives,
+    and so the policy name means something on both sides. Until the worker has
+    seen a query and taken a block's bounds, this behaves as recency -- which
+    is also what it degrades to for any block whose bounds were never captured,
+    since a block that cannot be scored must not be silently treated as
+    unwanted.
+    """
+
+    name = "quest"
+
+    def __init__(self, budget: int, sink: int = 2) -> None:
+        self.budget = budget
+        self.sink = sink
+        self._fallback = Recency(budget, sink)
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        return self._fallback.resident(n_full, num_computed)
+
+
 class Full:
     """Everything resident. The control arm, and it must be bit-exact.
 
@@ -250,5 +273,6 @@ class Full:
 
 
 POLICIES: dict[str, type[Policy]] = {
-    p.name: p for p in (Recency, Stress, Churn, Oracle, OracleLate, Full)
+    p.name: p for p in (Recency, Stress, Churn, Quest, Oracle,
+                        OracleLate, Full)
 }

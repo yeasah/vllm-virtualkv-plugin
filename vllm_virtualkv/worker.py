@@ -44,6 +44,7 @@ import torch
 from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
+from .quest import QueryCapture, QuestScorer
 
 if TYPE_CHECKING:
     # Under TYPE_CHECKING only: this package is imported by vLLM's plugin
@@ -100,6 +101,14 @@ class WorkerPager:
         self.evictions_refused: int = 0
         #: requests whose host copies have been let go
         self.released: int = 0
+        #: set when the policy is query-aware; see quest.py
+        self.scorer: QuestScorer | None = None
+        self.capture: QueryCapture | None = None
+        self.ranked: int = 0
+        self.unscored: int = 0
+        #: the last set the scorer chose, kept for inspection because the
+        #: shared state drops it the moment the request finishes
+        self.last_selection: list[int] = []
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -219,6 +228,14 @@ class WorkerPager:
             self.host_slots = slots
             self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
+            if self.config is not None and self.config.policy == "quest":
+                spec = runner.kv_cache_config.kv_cache_groups[0].kv_cache_spec
+                self.scorer = QuestScorer(
+                    head_size=spec.head_size, head_size_v=spec.head_size_v,
+                    head_agg=self.config.head_agg,
+                    layer_agg=self.config.layer_agg)
+                self.capture = QueryCapture()
+                self.capture.install(runner.model)
 
     def apply(self, runner: GPUModelRunner, batch: InputBatch,
               prepared: PreparedAttn) -> None:
@@ -226,6 +243,10 @@ class WorkerPager:
         if not block_tables:
             return
         self._plan = {}
+        if self.capture is not None:
+            # This forward's queries have not happened yet; what is held is the
+            # previous one's, which is what the ranking is allowed to use.
+            self.capture.rotate()
         self._release_finished()
         table = block_tables[0]
         slots = slot_mappings[0] if slot_mappings is not None else None
@@ -281,6 +302,9 @@ class WorkerPager:
             if not decoding:
                 continue
 
+            if self.scorer is not None:
+                self._score(req_id, b, step, computed, block_size, caches)
+
             # 3. the view -- recorded here, applied at the metadata builder
             row = step.row
             resident = self._resident_now(step, computed, block_size, len(row))
@@ -333,6 +357,51 @@ class WorkerPager:
         keep += [i for i in range(mgr_tail, tail + 1) if i < row_len]
         return keep
 
+    def _score(self, req_id, row_index, step, computed, block_size, caches):
+        """Take bounds for what is here, and choose what should be here next.
+
+        Bounds can only be taken while a block is resident, so this runs before
+        anything is evicted; a block never observed can never be ranked, and
+        would never be asked back. Blocks whose bounds are unknown are kept
+        rather than dropped, which is the safe direction to be wrong in.
+        """
+        budget = self.budget or 0
+        if not budget:
+            return
+        n_full = computed // block_size
+        row = step.row
+        # Everything still *allocated*, not everything still resident. Blocks
+        # chosen for eviction this step are readable for exactly this step, and
+        # they are the ones about to leave -- observing only the resident set
+        # meant a block was evicted before its bounds were ever taken, so it
+        # could never be ranked and never asked back. At the first paging step
+        # that is most of the context.
+        observable = set(step.resident) | {i for i, _ in step.evicting}
+        for i in observable:
+            if i < n_full and i < len(row) and row[i] != 0:
+                self.scorer.observe(req_id, i, caches, row[i])
+
+        queries = self.capture.for_row(row_index) if self.capture else []
+        if not queries:
+            return
+        ranked = self.scorer.rank(req_id, range(n_full), queries)
+        if not ranked:
+            return
+        self.ranked += 1
+        sink = self.config.sink if self.config else 0
+        keep = list(range(min(sink, n_full)))
+        unknown = [i for i in range(n_full)
+                   if (req_id, i) not in self.scorer.bounds]
+        self.unscored += len(unknown)
+        keep += unknown                          # never drop what was not scored
+        for index, _score in ranked:
+            if len(set(keep)) >= budget:
+                break
+            keep.append(index)
+        selection = sorted(set(keep))[:max(budget, len(unknown))]
+        self.state.desired[req_id] = selection
+        self.last_selection = selection
+
     def _release_finished(self) -> None:
         """Give back the host slots of requests the scheduler has let go.
 
@@ -347,6 +416,8 @@ class WorkerPager:
             return
         for req_id in self.state.take_finished():
             self.tier.release_request(req_id)
+            if self.scorer is not None:
+                self.scorer.forget(req_id)
             self.released += 1
 
     def _validate(self, req_id: str, row: list[int], resident: list[int],
@@ -377,6 +448,9 @@ class WorkerPager:
                "missing_host_copy": self.missing_host_copy,
                "evictions_refused": self.evictions_refused,
                "released": self.released,
+               "ranked": self.ranked,
+               "unscored": self.unscored,
+               "last_selection": list(self.last_selection),
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()

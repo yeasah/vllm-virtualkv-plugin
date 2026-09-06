@@ -196,7 +196,16 @@ class PagedAttentionManager:
         n_full = min(processed_computed_tokens // self.block_size, len(blocks))
         if n_full <= 0:
             return
-        resident = set(self.policy.resident(n_full, processed_computed_tokens))
+        # A query-aware policy is computed on the worker, which is the only
+        # side that has a query, and arrives one step stale. Anything it names
+        # outside the current full-block range is dropped rather than trusted:
+        # it was chosen against a shorter context.
+        chosen = self.state.desired.get(request_id)
+        if chosen is not None:
+            resident = {i for i in chosen if 0 <= i < n_full}
+        else:
+            resident = set(self.policy.resident(n_full,
+                                                processed_computed_tokens))
 
         null_id = self._null_block.block_id
         # A block another request also holds -- a prefix-cache hit shared with

@@ -30,8 +30,12 @@ be collapsed into one number per block, and the two choices pull apart: `max`
 is the sound upper bound, while an earlier measurement on this stack found mean
 aggregation captured noticeably more attention mass than max when selecting a
 GQA group's shared set (76.7% vs 69.6% at a 5% budget). Both are exposed;
-neither is measured *here*, and the layer-wise union in particular is
-unmeasured anywhere.
+neither is measured *here*. Measured elsewhere, since: with `head_agg="mean"`
+a scored policy failed to select the block holding a planted answer, and with
+`"max"` it selected it, at the same budget -- so the earlier mass-capture
+finding does not transfer to retrieval, where the signal sits in a few query
+heads and averaging over the group dilutes it. The layer-wise choice made no
+difference to that outcome.
 """
 
 from __future__ import annotations
