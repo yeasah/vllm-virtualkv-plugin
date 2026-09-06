@@ -120,3 +120,46 @@ def test_the_requirement_tracks_the_things_it_is_derived_from():
     assert required_host_slots(16, fake_config(2048, 16, 8)) > base, "concurrency"
     assert required_host_slots(64, fake_config(2048, 16, 4)) < base, "budget"
     assert required_host_slots(0, fake_config(1 << 20, 16, 64)) == 0
+
+
+def test_a_budget_can_be_written_in_the_unit_that_makes_sense():
+    from vllm_virtualkv.config import parse_budget, resolve_budget
+
+    engine = fake_config(8192, 16, 4)
+    assert resolve_budget(parse_budget("64"), engine) == 64
+    assert resolve_budget(parse_budget("1024t"), engine) == 64
+    assert resolve_budget(parse_budget("25%"), engine) == 128
+    assert resolve_budget(parse_budget(0), engine) == 0
+
+
+def test_the_same_budget_means_the_same_thing_at_a_different_block_size():
+    """The reason blocks are the wrong unit: they are not the operator's.
+
+    A sweep written in blocks is not a sweep of the same quantity once the
+    engine's block size changes, so results taken at one geometry cannot be
+    compared with another.
+    """
+    from vllm_virtualkv.config import parse_budget, resolve_budget
+
+    spec = parse_budget("1024t")
+    assert resolve_budget(spec, fake_config(8192, 16, 1)) == 64
+    assert resolve_budget(spec, fake_config(8192, 32, 1)) == 32   # same tokens
+    blocks = parse_budget("64")
+    assert resolve_budget(blocks, fake_config(8192, 16, 1)) == 64
+    assert resolve_budget(blocks, fake_config(8192, 32, 1)) == 64  # twice the tokens
+
+
+def test_a_budget_that_cannot_be_read_is_refused_at_startup():
+    from vllm_virtualkv.config import parse_budget
+
+    for bad in ("abc", "150%", "-5%", "12x"):
+        with pytest.raises(ValueError):
+            parse_budget(bad)
+
+
+def test_a_sink_larger_than_the_resolved_budget_is_caught_late():
+    """`25%` cannot be checked against a sink until an engine says how big it is."""
+    cfg = Config(budget="1%", sink=8)
+    cfg.validate()                       # nothing knowable yet
+    with pytest.raises(ValueError, match="exceeds the resolved budget"):
+        cfg.resolve(fake_config(2048, 16, 1))      # 1% of 2048 = 1 block

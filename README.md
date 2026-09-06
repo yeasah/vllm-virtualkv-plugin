@@ -59,7 +59,7 @@ vllm serve <model>
 | variable | default | meaning |
 |---|---|---|
 | `VLLM_VIRTUALKV` | off | must be set, or the plugin does nothing at all |
-| `VLLM_VIRTUALKV_BUDGET` | `0` | resident full blocks per request; `0` evicts nothing |
+| `VLLM_VIRTUALKV_BUDGET` | `0` | residency per request: `64` blocks, `1024t` tokens, or `25%` of `max_model_len`; `0` evicts nothing |
 | `VLLM_VIRTUALKV_POLICY` | `recency` | which blocks to keep |
 | `VLLM_VIRTUALKV_SHOW_PENDING` | off | read blocks chosen for eviction but not yet freed |
 | `VLLM_VIRTUALKV_SINK` | `2` | leading blocks always kept |
@@ -158,6 +158,25 @@ is one file:
   outgrows the context. There is no seam: the protocol can say "here are more
   blocks" and cannot say "this block now lives at index `i`". Closing it means
   a field on `SchedulerOutput`.
+
+## Reading an accuracy number from this
+
+Paging is decode-only, so a quality measurement taken now is an **optimistic
+bound**, and it is worth being clear about that before producing one rather
+than after. A request's prompt attends to itself in full during prefill; only
+generation runs against a restricted set. Adding prefill residency can lower
+quality and cannot raise it, so a policy that looks bad here will not look
+better later.
+
+That does not make the number uninteresting — it is the number for the shape
+most real work has, a long prompt and a short generation, where what matters is
+whether the few generated steps can reach the right blocks. Recency losing the
+needle at 12% residency is a real finding under exactly this reading.
+
+Four concurrent requests have been exercised (all four bit-identical under
+`churn`, zero guard violations over 88 steps, including the exclusivity check
+that catches two requests sharing a block). Contexts beyond a few thousand
+tokens have not.
 
 ## Limits
 

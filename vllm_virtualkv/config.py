@@ -12,6 +12,56 @@ import os
 from .policy import POLICIES
 
 
+def parse_budget(raw: str | int) -> tuple[str, float]:
+    """Read a residency budget written in whichever unit made sense.
+
+        64      64 blocks -- an engine detail the operator did not choose
+        1024t   1024 tokens
+        25%     a quarter of max_model_len
+
+    Blocks are the unit the code wants and the worst one to ask for: block size
+    is not the operator's decision, so a budget in blocks cannot be compared
+    across models or engines, and a sweep written in it is not a sweep of the
+    same thing. Tokens and fractions resolve to blocks once the engine is up
+    and both numbers are known.
+
+    Returns (kind, value) so the format can be rejected at startup rather than
+    at the first request.
+    """
+    if isinstance(raw, int):
+        return ("blocks", float(raw))
+    text = str(raw).strip().lower()
+    if not text:
+        return ("blocks", 0.0)
+    try:
+        if text.endswith("%"):
+            value = float(text[:-1])
+            if not 0 <= value <= 100:
+                raise ValueError
+            return ("fraction", value / 100.0)
+        if text.endswith("t"):
+            return ("tokens", float(text[:-1]))
+        if text.endswith("b"):
+            return ("blocks", float(text[:-1]))
+        return ("blocks", float(text))
+    except ValueError:
+        raise ValueError(
+            f"cannot read a budget from {raw!r}; use blocks (64), tokens "
+            f"(1024t) or a share of max_model_len (25%)"
+        ) from None
+
+
+def resolve_budget(parsed: tuple[str, float], vllm_config) -> int:
+    """Turn a parsed budget into whole blocks, now that the engine is known."""
+    kind, value = parsed
+    block_size = vllm_config.cache_config.block_size
+    if kind == "tokens":
+        value = value / block_size
+    elif kind == "fraction":
+        value = value * vllm_config.model_config.max_model_len / block_size
+    return int(value) if value <= 0 else max(1, int(value))
+
+
 class Config:
     """How a deployment turns this on, without editing code.
 
@@ -24,7 +74,11 @@ class Config:
 
     def __init__(self, budget=0, sink=2, policy="recency", host_slots=None,
                  verify=True, show_pending=False):
-        self.budget = budget
+        #: (kind, value) until an engine exists; `budget_blocks` after.
+        self.budget_spec = parse_budget(budget)
+        #: Whole blocks. Only meaningful once `resolve` has run, except when
+        #: the budget was given in blocks to begin with.
+        self.budget = int(self.budget_spec[1]) if self.budget_spec[0] == "blocks" else 0
         self.sink = sink
         self.policy = policy
         self.host_slots = host_slots
@@ -47,7 +101,7 @@ class Config:
             return default if raw is None or raw == "" else cast(raw)
 
         cfg = cls(
-            budget=get("BUDGET", 0, int),
+            budget=get("BUDGET", 0, str),
             sink=get("SINK", 2, int),
             policy=get("POLICY", "recency", str),
             # None means derive it. A knob that is checked against a hard
@@ -64,6 +118,23 @@ class Config:
         cfg.validate()
         return cfg
 
+    def resolve(self, vllm_config) -> int:
+        """Fix the budget in blocks, once the engine can say how big one is."""
+        self.budget = resolve_budget(self.budget_spec, vllm_config)
+        if self.budget and self.sink > self.budget:
+            raise ValueError(
+                f"sink ({self.sink}) exceeds the resolved budget "
+                f"({self.budget} blocks from {self.describe_budget()})")
+        return self.budget
+
+    def describe_budget(self) -> str:
+        kind, value = self.budget_spec
+        if kind == "tokens":
+            return f"{value:g} tokens"
+        if kind == "fraction":
+            return f"{value * 100:g}% of max_model_len"
+        return f"{value:g} blocks"
+
     def validate(self) -> None:
         if self.policy == "churn" and not self.show_pending:
             raise ValueError(
@@ -73,9 +144,10 @@ class Config:
         if self.policy not in POLICIES:
             raise ValueError(
                 f"unknown policy {self.policy!r}; have {sorted(POLICIES)}")
-        if self.budget < 0 or self.sink < 0:
+        if self.budget_spec[1] < 0 or self.sink < 0:
             raise ValueError("budget and sink must be non-negative")
-        if self.budget and self.sink > self.budget:
+        if self.budget_spec[0] == "blocks" and self.budget and \
+                self.sink > self.budget:
             raise ValueError(
                 f"sink ({self.sink}) cannot exceed budget ({self.budget})")
         if self.host_slots is not None and self.host_slots <= 0:
@@ -88,6 +160,6 @@ class Config:
 
     def __repr__(self) -> str:
         slots = "auto" if self.host_slots is None else self.host_slots
-        return (f"Config(budget={self.budget}, sink={self.sink}, "
+        return (f"Config(budget={self.describe_budget()}, sink={self.sink}, "
                 f"policy={self.policy!r}, host_slots={slots}, "
                 f"verify={self.verify}, show_pending={self.show_pending})")

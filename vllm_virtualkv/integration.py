@@ -113,6 +113,7 @@ def patch_spec(config: Config):
             return spec
         if not warned:
             warned.append(True)
+            config.resolve(vllm_config)
             _, message = check_host_tier_size(config, vllm_config)
             if message:
                 from vllm.logger import init_logger

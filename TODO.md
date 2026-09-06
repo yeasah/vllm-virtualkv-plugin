@@ -2,37 +2,33 @@
 
 Open work only. What is settled lives in `README.md`.
 
-## `serving-knobs` — residency is specified in the wrong units
+## `serving-knobs` — partly done
 
-`VLLM_VIRTUALKV_BUDGET` is *full blocks resident per request*, which is a
-convenient number for the code and a useless one for an operator. Nobody sizes
-a deployment in blocks per request: they have a card, a model, a concurrency
-target, and a context length.
+A budget can now be written as blocks (`64`), tokens (`1024t`) or a share of
+`max_model_len` (`25%`), resolved once the engine can say how big a block is.
+That was the part accuracy work needed: a sweep written in blocks is not a
+sweep of the same quantity across models or block sizes, so results taken at
+one geometry cannot be compared with another.
 
-Three problems, and the second is the one with a measurement behind it.
+Two pieces remain, neither blocking:
 
-1. **Per-request is the wrong scope.** The quantity an operator controls is the
-   *pool*, shared across whatever is running. A per-request budget silently
-   becomes a global one multiplied by concurrency.
-2. **A fraction of context would also be wrong**, which is worth stating
-   because it is the obvious fix. The transport measurement says the fetch
-   budget is *absolute* — roughly 543 tokens per decode step at 5% added
-   latency on a 27B at fp8, whatever the context length — so "keep 10%
-   resident" is cheap at 32K and unaffordable at 300K. What a policy has to
-   bound is tokens fetched per step, and neither blocks-per-request nor a
-   percentage expresses that.
-3. **Tokens, not blocks.** Block size is an engine detail the operator did not
-   choose.
-
-Probably: a pool-level target in bytes or tokens, a per-step fetch ceiling, and
-let the policy derive per-request budgets from what is running.
-
-And an `auto` mode, since `BUDGET` is checked against the pool the same way
-`HOST_SLOTS` is checked against the displaced set — see the rule in the README.
-`BUDGET=auto` would be the largest budget under which `max_num_seqs` requests
-fit, which is arithmetic the engine can do and the operator cannot do as well.
+1. **Per-request is still the wrong scope.** The quantity an operator controls
+   is the *pool*, shared across whatever is running; a per-request budget
+   becomes a global one multiplied by concurrency. Wants cross-request
+   coordination, which is a design rather than a knob.
+2. **The fetch ceiling is not expressed at all.** The transport measurement
+   says the budget that matters is *absolute* — roughly 543 tokens per decode
+   step at 5% added latency on a 27B at fp8, whatever the context length — so
+   neither a block count nor a percentage says the thing a policy has to bound.
+   That knob only becomes meaningful with a policy that fetches, so it belongs
+   with `demand-signal`.
 
 ## `undersized-cache` — you cannot declare a context larger than VRAM
+
+**Do not do this before `prefill-residency`.** On its own it converts a startup
+error into an OOM during the first prefill, since prefill allocates the whole
+prompt before any residency decision is made. The two are one piece of work.
+
 
 `check_enough_kv_cache_memory` (`vllm/v1/core/kv_cache_utils.py`) raises at
 startup unless **one** request at `max_model_len` fits entirely in the KV cache.
