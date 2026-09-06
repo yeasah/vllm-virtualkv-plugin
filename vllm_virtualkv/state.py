@@ -53,6 +53,11 @@ class PagerState:
 
     def __init__(self) -> None:
         self.steps: dict[str, RequestStep] = {}
+        #: Requests the scheduler has freed, waiting for the worker to let go
+        #: of their host copies. The second thing that travels worker-ward's
+        #: opposite direction, and it exists because the side that knows a
+        #: request has ended is not the side holding its bytes.
+        self.finished: set[str] = set()
         self.block_size: int = 0
         self.publishes: int = 0
 
@@ -65,6 +70,12 @@ class PagerState:
 
     def drop(self, req_id: str) -> None:
         self.steps.pop(req_id, None)
+        self.finished.add(req_id)
+
+    def take_finished(self) -> set[str]:
+        """Drain the finished set. The caller becomes responsible for them."""
+        done, self.finished = self.finished, set()
+        return done
 
 
 #: One pager per process. A module-level handle because the manager is

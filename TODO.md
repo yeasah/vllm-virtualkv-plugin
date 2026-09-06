@@ -87,8 +87,46 @@ Not this plugin's business — it belongs upstream, and it is worth more there
 than here — but it is adjacent enough to record: this plugin's own knobs have
 the same problem, which is `serving-knobs` above.
 
-## `prefix-caching` — untested, and not merely untested
+## `prefix-caching` — first evidence, and it is better than expected
 
-Every measurement so far ran with prefix caching off. Blocks are hashed and
-registered as they fill, so an evicted block can be handed to another request
-by hash. The interaction is genuinely open, not just unexercised.
+Exercised 2026-09-06 across a six-turn conversation whose prompt grows each
+turn, which is the shape that actually creates shared prefixes:
+
+- `churn` with prefix caching **on** is bit-identical to no plugin, in tokens
+  and logprobs, over all six turns. 1287 blocks out, 1152 back, no restore
+  unbacked, no guard violation.
+- `recency` at a real budget with caching on runs clean too — 375 evictions,
+  no violations — and drops context, which is what it is for.
+
+That is consistent with the argument the design made and never tested: a pager
+*relocates* blocks rather than modifying them, so a block's hash stays truthful
+whoever holds it. A request that evicts a block still owns those tokens; the
+pool may hand the block to someone else under its hash, and both are right,
+because our copy comes back from the host rather than from that block.
+
+Not settled. Churn only hides a block for a single step, and the recency arm
+has no exact reference to be judged against — it changes the output on purpose.
+What would settle it is a run where a *second* request demonstrably hits the
+hash of a block the *first* has evicted, with the hit verified rather than
+hoped for. Nothing here proves that case occurred.
+
+## `serving-exposure` — point something real at it
+
+The argument for doing this earlier than its dependencies suggest: benchmarks
+cover the request shapes we thought of, and real traffic covers the ones we did
+not. Multi-turn conversations, aborts, preemption, ragged lengths and the
+attention patterns they produce are where architectural problems surface, and
+architectural problems are the expensive kind to find late.
+
+The lifecycle leak found on 2026-09-06 is the argument in miniature: nothing
+released a finished request's host slots, so a server would have lost one per
+evicted block per request until the tier filled, then refused every eviction
+and quietly stopped honouring the budget. No test of a handful of requests
+could see it; a morning of real use would have.
+
+It implies `prefill-residency`, which is not the tidy next step. That is the
+trade, and it is a real one rather than an argument for postponing.
+
+Still untested and reachable this way: preemption and resumption (a preempted
+request has all its blocks freed while the tier still holds copies keyed to
+it), request aborts mid-generation, and contexts past a few thousand tokens.

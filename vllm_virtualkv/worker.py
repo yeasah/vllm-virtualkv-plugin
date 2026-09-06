@@ -92,6 +92,8 @@ class WorkerPager:
         self.clock_mismatch: int = 0
         #: evictions vetoed because the host tier had no room for them
         self.evictions_refused: int = 0
+        #: requests whose host copies have been let go
+        self.released: int = 0
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -216,6 +218,7 @@ class WorkerPager:
         if not block_tables:
             return
         self._plan = {}
+        self._release_finished()
         table = block_tables[0]
         slots = slot_mappings[0] if slot_mappings is not None else None
         block_size = runner.block_tables.kernel_block_sizes[0]
@@ -322,6 +325,22 @@ class WorkerPager:
         keep += [i for i in range(mgr_tail, tail + 1) if i < row_len]
         return keep
 
+    def _release_finished(self) -> None:
+        """Give back the host slots of requests the scheduler has let go.
+
+        Nothing else does. A slot held past the end of its request is never
+        reused, so a long-running server leaks one per evicted block per
+        request until the tier is full -- at which point every eviction is
+        refused, the budget silently stops being a budget, and the only
+        symptom is that residency creeps upward. The kind of thing a
+        four-request test cannot see.
+        """
+        if self.tier is None:
+            return
+        for req_id in self.state.take_finished():
+            self.tier.release_request(req_id)
+            self.released += 1
+
     def _validate(self, req_id: str, row: list[int], resident: list[int],
                   num_blocks: int) -> None:
         """Fail where the mistake is, not where the GPU notices it.
@@ -349,6 +368,7 @@ class WorkerPager:
                "copied_out": self.copied_out,
                "missing_host_copy": self.missing_host_copy,
                "evictions_refused": self.evictions_refused,
+               "released": self.released,
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()

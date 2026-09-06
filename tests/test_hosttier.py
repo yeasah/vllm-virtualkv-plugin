@@ -118,3 +118,32 @@ def test_release_request_clears_only_that_request():
     tier.store(("b", 0), caches, 1)
     tier.release_request("a")
     assert ("a", 0) not in tier and ("b", 0) in tier
+
+
+def test_a_finished_request_gives_its_slots_back():
+    """The leak a short test cannot see.
+
+    Nothing released a finished request's host copies, so a server would lose
+    one slot per evicted block per request until the tier was full -- and then
+    refuse every eviction, quietly stop honouring the budget, and show it only
+    as residency creeping upward.
+    """
+    from vllm_virtualkv import state as pager_state
+    from vllm_virtualkv.worker import WorkerPager
+
+    caches = make_caches()
+    state = pager_state.reset()
+    pager = WorkerPager(host_slots=8)
+    pager.tier = HostTier(caches, num_slots=8)
+
+    for turn in range(20):                     # more requests than slots
+        req = f"req-{turn}"
+        for logical in range(3):
+            pager.tier.store((req, logical), caches, logical)
+        assert pager.tier.free_slots >= 0
+        state.drop(req)                        # the scheduler frees it
+        pager._release_finished()              # the worker hears about it
+
+    assert len(pager.tier) == 0, f"held after 20 requests: {pager.tier.stats()}"
+    assert pager.tier.free_slots == 8
+    assert pager.released == 20
