@@ -80,7 +80,7 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
                  queries: Sequence[torch.Tensor], block_size: int,
                  head_size: int, scale: float,
                  head_size_v: int | None = None, tail: int = 0,
-                 share: float = 0.25,
+                 share: float = 0.25, shares: Sequence[float] = (),
                  stale: Sequence[torch.Tensor] | None = None) -> dict | None:
     """Which resident summary picks the blocks that actually carry the mass.
 
@@ -152,8 +152,8 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
     budget = max(1, int(round(share * n_full)))
     total = float(true_sum.sum()) or 1.0
 
-    def captured(rank: torch.Tensor) -> float:
-        pick = torch.topk(rank, min(budget, n_full)).indices
+    def captured(rank: torch.Tensor, b: int | None = None) -> float:
+        pick = torch.topk(rank, min(b or budget, n_full)).indices
         return float(true_sum[pick].sum()) / total
 
     recency = torch.arange(n_full, device=device, dtype=torch.float32)
@@ -181,6 +181,20 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
     if stale:
         out["oracle_stale"] = captured(stale_true)
         out["q2_stale"] = captured(stale_q2)
+
+    # How the prize changes with the budget. A demand signal is worth
+    # whatever separates it from what recency gets for free, and at a
+    # generous budget a recency window already covers much of the context
+    # -- so measuring only there understates scoring exactly where every
+    # compression method actually operates.
+    for sh in shares:
+        b = max(1, int(round(sh * n_full)))
+        sr = recency.clone()
+        sr[:2] = float(n_full + 10)
+        out[f"oracle@{sh:g}"] = captured(true_sum, b)
+        out[f"q2@{sh:g}"] = captured(est_sum[2], b) if 2 in est_sum else 0.0
+        out[f"sinkrec@{sh:g}"] = captured(sr, b)
+        out[f"budget@{sh:g}"] = b
 
     # The union question in mass terms: the globally-best pick still has to
     # serve every layer, and the worst-served layer is what a flat union is

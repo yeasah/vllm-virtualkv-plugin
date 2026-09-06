@@ -114,6 +114,19 @@ def main() -> int:
         for k, label in order:
             if k in sm:
                 print(f"    {label:20s} {sm[k]:.4f}")
+        shares = (0.02, 0.05, 0.10, 0.25, 0.50)
+        if f"oracle@{shares[0]:g}" in sm:
+            print("\n  how the prize changes with the budget"
+                  " -- mass captured\n")
+            print("   budget   blocks   sinks+recency   2-bit   oracle   "
+                  "gap to close")
+            for sh in shares:
+                sr = sm.get(f"sinkrec@{sh:g}", 0)
+                q2 = sm.get(f"q2@{sh:g}", 0)
+                orc = sm.get(f"oracle@{sh:g}", 0)
+                print(f"   {sh:6.0%}   {sm.get(f'budget@{sh:g}', 0):6.0f}   "
+                      f"{sr:13.4f}   {q2:.4f}   {orc:.4f}   "
+                      f"{orc - sr:+.4f}")
         print(f"\n  mass in the first two blocks alone: "
               f"{sm.get('sink_mass', 0):.4f}")
         print(f"\n  under the oracle pick: median layer keeps "

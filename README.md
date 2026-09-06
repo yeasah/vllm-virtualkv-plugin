@@ -72,12 +72,18 @@ and the shape of it has been measured rather than assumed. At a budget of 23 of
 | **sinks + recency (what ships today)** | **0.7907** |
 | recency without sinks | 0.3384 |
 
-**Read the last two rows together.** Two blocks of 112 hold 46% of all
-attention mass, and the shipped policy keeps them. A selector that does not
-looks 2.3x worse than it is, and every earlier version of this table made
-that mistake. The gap a demand signal can close is 0.7907 to 0.8811 — 11%,
-not the 220% a sinkless baseline implies — which is small enough to explain
-why it does not show up end to end.
+**Read the last two rows together.** Two blocks hold 46% of all attention
+mass, and the shipped policy keeps them; a selector that does not looks 2.3x
+worse than it is, and earlier versions of this table made that mistake.
+
+**And read the whole table as context-length dependent**, because that turns
+out to matter more. The gap between what recency gets free and what a scored
+policy can reach grows with context: at 25% residency it is +0.097 over 112
+blocks and +0.177 over 346, while recency's own capture decays (0.79 -> 0.71)
+and the oracle holds (0.887 -> 0.889). A recency window is a fixed fraction
+of a growing context. Every number above was taken at a few thousand tokens,
+which is the regime least favourable to scoring and least like the one this
+plugin exists for.
 
 Three further results in that table. Quantized keys rank as well as the true keys, at
 two bits, because ranking needs order and not accuracy. Quest-style min/max

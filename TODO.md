@@ -223,15 +223,36 @@ was compared against kept none. So:
 | **sinks + recency (what ships)** | **0.7907** |
 | recency, no sinks (what was quoted) | 0.3384 |
 
-The reported "2-bit captures 0.8708 against recency's 0.2743, 3.2x" is wrong.
-The real comparison is 0.8811 against 0.7907 — **11% relative, not 220%**.
+The reported "2-bit captures 0.8708 against recency's 0.2743, 3.2x" is wrong:
+the sinkless baseline flattered it by 46 points of sink mass.
 
-This dissolves the puzzle rather than deepening it. There was never a large
-gap for a demand signal to close: a scored policy can add at most ten points
-of mass over what recency gets for free, and a ten-point gain on a proxy that
-tracks output damage only loosely is exactly the size of effect that vanishes
-end to end. `massoracle` losing to `recency` stops being a contradiction and
-becomes a marginal gain minus churn cost.
+**But the corrected gap is not small either, and that correction was itself
+taken at the wrong context length.** Those numbers came from 112 blocks --
+about 1800 tokens. Repeating the sweep at 346 blocks, the gap roughly doubles
+at every budget:
+
+| budget | gap @112 blocks | gap @346 blocks |
+|---|---|---|
+| 5% | +0.0492 | +0.1137 |
+| 10% | +0.0646 | +0.1501 |
+| 25% | +0.0969 | +0.1770 |
+| 50% | +0.0968 | +0.1642 |
+
+The components say why: `sinks+recency` decays with length (0.7907 -> 0.7121)
+while the oracle holds (0.8875 -> 0.8892). A recency window is a fixed
+fraction of a growing context so it covers proportionally less of what
+matters; a scored policy follows the content. Sink mass is flat at ~0.45, so
+sinks dominate only at short context.
+
+At 5.5k tokens the prize is already 25% relative and the trend is steep and
+not flattening. Every KV-compression method is evaluated at 32k-128k, which
+is where scoring earns its keep -- and it answers the obvious objection
+("why does TriAttention work, then?"): it operates where the gap is large.
+Both results hold; the short-context one simply cannot show it.
+
+**No mass number in this repo taken below ~5k tokens of context should be
+generalised.** That is a sharper rule than the sink one and it invalidates
+more.
 
 It is also the mechanism behind mass and importance diverging: 46% of mass in
 two blocks carrying no information is what the sink literature describes.
