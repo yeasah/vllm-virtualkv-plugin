@@ -109,6 +109,10 @@ class WorkerPager:
         self.unscored: int = 0
         #: steps where last step's queries were not available to rank with
         self.no_queries: int = 0
+        #: how much the chosen set moves step to step -- the thrash a scored
+        #: policy pays that a positional one does not
+        self.churn_moves: int = 0
+        self.churn_steps: int = 0
         #: the last set the scorer chose, kept for inspection because the
         #: shared state drops it the moment the request finishes
         self.last_selection: list[int] = []
@@ -240,7 +244,8 @@ class WorkerPager:
                 self.scorer = QuestScorer(
                     head_size=spec.head_size, head_size_v=spec.head_size_v,
                     head_agg=self.config.head_agg,
-                    layer_agg=self.config.layer_agg)
+                    layer_agg=self.config.layer_agg,
+                    decay=self.config.score_decay)
                 self.capture = QueryCapture()
                 self.capture.install(runner.model)
                 self._spec = spec
@@ -419,6 +424,10 @@ class WorkerPager:
                 break
             keep.append(index)
         selection = sorted(set(keep))[:max(budget, len(unknown))]
+        if self.last_selection:
+            moved = len(set(selection) ^ set(self.last_selection))
+            self.churn_moves += moved
+            self.churn_steps += 1
         self.last_selection = selection
         # Only a query-aware *policy* may steer residency. The scorer also runs
         # under `audit`, which needs its bounds and queries -- and publishing
@@ -511,6 +520,8 @@ class WorkerPager:
                "ranked": self.ranked,
                "unscored": self.unscored,
                "no_queries": self.no_queries,
+               "set_churn": (self.churn_moves / self.churn_steps
+                             if self.churn_steps else 0.0),
                "last_selection": list(self.last_selection),
                "audit": self._audit_summary(),
                "clock_mismatch": self.clock_mismatch}

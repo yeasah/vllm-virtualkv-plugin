@@ -97,7 +97,37 @@ that sat in blocks the policy did not have. Transfer counters cannot
 distinguish a policy that fetches well from one that fetches constantly;
 `missed_mass`, `fetched_mass` and `evicted_mass` can.
 
-**First comparison, and it is not a win.** GSM8K as 8 turns, budget 12 blocks:
+**Ranking on accumulated standing rather than the current step.** A step's
+scores become a distribution before they are accumulated -- their scale rides
+on the query's norm, so mixing raw scores would let one step's magnitude
+outvote another's shape -- and a block's standing decays instead of being
+replaced. A block seen for the first time starts at what it is worth now, so a
+new signal is still actionable immediately; an old one fades rather than
+vanishing, which is the pressure to keep a block that has stopped being
+indicated. GSM8K as 8 turns, budget 12 blocks:
+
+| decay | missed mass | worst layer | set churn | moved out/in |
+|---|---|---|---|---|
+| 1.0 (per-step) | 0.0097 | 0.427 | 9.65 blk/step | 4747 / 4289 |
+| 0.5 | 0.0098 | 0.386 | 4.45 | 2761 / 2293 |
+| 0.2 | 0.0076 | 0.417 | 2.00 | 1347 / 886 |
+| **0.05** | **0.0070** | **0.297** | **0.66** | 670 / **217** |
+
+Better on every axis at once, which is not what a smoothing knob usually does:
+28% less missed mass, a third off the worst layer, 15x less set movement and a
+twentieth of the fetches. Against recency (missed 0.0121, 460 out, 0 in) the
+scored policy is now 42% better on mass at a transport cost in the same order
+rather than ten times it. The trend had not turned at 0.05, so the optimum may
+be lower and is untested.
+
+**The accuracy column still disagrees and is still not evidence.** 0/8 against
+recency's 3/8, on a model that manages 3/8 with the whole context, at n=8. It
+is the measure that matters and it is not moving the right way; it is also far
+too noisy here to read. Resolving that needs a model that can do the task and
+more turns than this.
+
+**The earlier comparison, kept because it is what the smoothing fixed.**
+GSM8K as 8 turns, budget 12 blocks:
 
 | policy | missed mass | worst layer | fetched mass | moved | correct |
 |---|---|---|---|---|---|
@@ -133,10 +163,7 @@ What is not yet known:
    runs.
 4. **A fetch ceiling**, now measured as the pressing gap rather than a
    theoretical one -- see the churn figures above.
-5. **Whether the instability is the problem.** Quest re-ranks every step and
-   the resident set moves with it; recency's set is stable. A policy that
-   thrashes may lose more to disruption than it gains in mass, which the
-   current metrics cannot separate. A "set churn per step" figure would.
+5. ~~Whether the instability is the problem.~~ **Measured, and it was.**
 
 
 

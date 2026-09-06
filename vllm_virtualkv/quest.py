@@ -42,13 +42,24 @@ class QuestScorer:
     """
 
     def __init__(self, head_size: int, head_size_v: int | None = None,
-                 head_agg: str = "max", layer_agg: str = "max") -> None:
+                 head_agg: str = "max", layer_agg: str = "max",
+                 decay: float = 1.0) -> None:
         self.head_size = head_size
         self.head_size_v = head_size_v
         self.head_agg = head_agg
         self.layer_agg = layer_agg
+        #: How much of a block's standing comes from this step. 1.0 ranks on
+        #: the current step alone, which is what makes a scored policy thrash:
+        #: it re-decides residency from scratch every token and the set moves
+        #: with it. Below 1.0 the ranking is evidence accumulated over the
+        #: request -- a new signal is acted on at once, an old one fades
+        #: instead of vanishing, so a block stays resident for a while after it
+        #: stops being indicated.
+        self.decay = decay
         #: (req_id, logical index) -> [layers, kv_heads, 2, head_size]
         self.bounds: dict[tuple[str, int], torch.Tensor] = {}
+        #: (req_id, logical index) -> accumulated standing, in [0, 1]
+        self.standing: dict[tuple[str, int], float] = {}
         self.computed = 0
 
     def observe(self, req_id: str, index: int, caches: Sequence[torch.Tensor],
@@ -64,6 +75,8 @@ class QuestScorer:
     def forget(self, req_id: str) -> None:
         for key in [k for k in self.bounds if k[0] == req_id]:
             del self.bounds[key]
+        for key in [k for k in self.standing if k[0] == req_id]:
+            del self.standing[key]
 
     def known(self, req_id: str, indices: Sequence[int]) -> list[int]:
         return [i for i in indices if (req_id, i) in self.bounds]
@@ -84,8 +97,35 @@ class QuestScorer:
 
         scores = bound_scores(queries, stacked, head_agg=self.head_agg,
                               layer_agg=self.layer_agg)
-        order = torch.argsort(scores, descending=True).tolist()
-        return [(known[i], float(scores[i])) for i in order]
+        if self.decay >= 1.0:
+            order = torch.argsort(scores, descending=True).tolist()
+            return [(known[i], float(scores[i])) for i in order]
+
+        # A step's scores become a distribution before they are accumulated.
+        # Their scale rides on the query's norm, so mixing raw scores across
+        # steps would let one step's magnitude outvote another's shape --
+        # which is the opposite of what accumulating is for. Min-max rather
+        # than softmax: a softmax over bounds this widely spread is nearly
+        # one-hot, and would accumulate almost as spikily as no smoothing.
+        low, high = float(scores.min()), float(scores.max())
+        spread = high - low
+        shares = ((scores - low) / spread) if spread > 0 else torch.ones_like(scores)
+        shares = shares / float(shares.sum())
+
+        blended = []
+        for i, index in enumerate(known):
+            key = (req_id, index)
+            share = float(shares[i])
+            # A block seen for the first time starts at what it is worth now,
+            # not at zero: a new signal has to be actionable immediately or
+            # smoothing becomes a refusal to notice anything.
+            previous = self.standing.get(key, share)
+            value = self.decay * share + (1.0 - self.decay) * previous
+            self.standing[key] = value
+            blended.append(value)
+
+        order = sorted(range(len(known)), key=lambda i: -blended[i])
+        return [(known[i], blended[i]) for i in order]
 
     def stats(self) -> dict:
         return {"blocks_scored": len(self.bounds), "computed": self.computed}
