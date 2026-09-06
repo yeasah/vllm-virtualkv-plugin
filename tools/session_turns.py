@@ -98,18 +98,35 @@ def fetch(args) -> int:
     return 0
 
 
-class Forcer:
-    """Make an arm decode the baseline's tokens instead of its own.
+class Tap:
+    """Force the baseline's tokens, and read the full distribution while there.
 
-    Free-running, an arm's first wrong token ends the comparison: every step
-    after it is conditioned on a different sequence, so the damage can only be
-    reported as *where* it broke. Forcing keeps every arm on one trajectory,
-    which makes each step's distribution directly comparable to the
-    baseline's, and turns a stopping point into a per-step magnitude.
+    Forcing exists because free-running truncates: an arm's first wrong token
+    ends the comparison, so damage can only be reported as *where* it broke.
+    Keeping every arm on one trajectory makes each step's distribution
+    comparable to the baseline's, and turns a stopping point into a per-step
+    magnitude. It is not a substitute for the free-running number -- it
+    measures damage under the counterfactual that the arm never derails, so a
+    policy that would spiral reads as merely dented.
 
-    It is not a substitute for the free-running number. Forcing measures the
-    damage under the counterfactual that the arm never actually derails, so a
-    policy that would spiral looks merely dented. Read the two together.
+    **Why a flip count and a mean logprob delta are not enough.** Both average
+    over positions whose difficulty differs by orders of magnitude. Where the
+    model is near-certain, a small perturbation is a destroyed fact; where it
+    is choosing among fifteen synonyms, the same perturbation is nothing, and
+    a flip there says more about English than about residency. Worse, *which*
+    token diverges first is largely decided by where the flat distributions
+    happen to fall, so two arms that diverge at different points were scored
+    at structurally different positions. So the tap records, from the full
+    logits it already has:
+
+    - **entropy** of the baseline's distribution at each step, which is what
+      the damage has to be read against. The steps that carry information out
+      of an evicted block are the low-entropy ones.
+    - **top-K of the baseline**, so an arm can compute a real divergence
+      against it rather than a delta on one token. `KL(P_ref || P_arm)` is
+      weighted by the baseline's own probabilities, so it does not care which
+      token was sampled, and diffuse positions cannot dominate it the way a
+      raw logprob delta lets them.
 
     The seam is `Sampler.sample`, chosen because the returned logprobs are
     computed upstream of it from the raw logits -- so substituting the token
@@ -126,13 +143,50 @@ class Forcer:
     every other check.
     """
 
+    K = 32
+    NUCLEUS = 0.9
+
     def __init__(self) -> None:
         self.script: list[int] = []
-        self.pos = 0
+        self.ref: list[tuple[list[int], list[float]]] = []
+        self.step = 0
         self.natural: list[int] = []
+        self.ent: list[float] = []
+        self.nuc: list[int] = []
+        self.kl: list[float] = []
+        self.cov: list[float] = []
+        self.topk: list[tuple[list[int], list[float]]] = []
 
-    def load(self, ids: list[int]) -> None:
-        self.script, self.pos, self.natural = ids, 0, []
+    def load(self, ids: list[int] | None,
+             ref: list[tuple[list[int], list[float]]] | None = None) -> None:
+        self.script = ids or []
+        self.ref = ref or []
+        self.step = 0
+        self.natural, self.ent, self.nuc = [], [], []
+        self.kl, self.cov, self.topk = [], [], []
+
+    def _observe(self, logits) -> None:
+        import torch
+
+        logp = torch.log_softmax(logits[0].float(), dim=-1)
+        p = logp.exp()
+        self.ent.append(float(-(p * logp).sum()))
+        srt = torch.sort(p, descending=True).values
+        cum = torch.cumsum(srt, 0)
+        self.nuc.append(int(torch.searchsorted(cum, self.NUCLEUS)) + 1)
+        tl, ti = torch.topk(logp, self.K)
+        self.topk.append(([int(x) for x in ti], [round(float(x), 6)
+                                                 for x in tl]))
+        if self.step < len(self.ref):
+            ids, lps = self.ref[self.step]
+            rid = torch.as_tensor(ids, device=logp.device)
+            rlp = torch.as_tensor(lps, device=logp.device, dtype=torch.float32)
+            rp = rlp.exp()
+            # KL(P_ref || P_arm) over the baseline's own top-K. The weight is
+            # p_ref, so the omitted tail is small by construction; `cov`
+            # reports how much of it was actually covered.
+            self.kl.append(float((rp * (rlp - logp[rid])).sum()))
+            self.cov.append(float(rp.sum()))
 
     def install(self) -> str:
         import torch
@@ -145,10 +199,12 @@ class Forcer:
 
         def sample(inner, logits, *a, **k):
             sampled, processed = original(inner, logits, *a, **k)
-            if self.pos < len(self.script) and sampled.numel() == 1:
-                self.natural.append(int(sampled.reshape(-1)[0]))
-                sampled = torch.full_like(sampled, self.script[self.pos])
-                self.pos += 1
+            if sampled.numel() == 1 and logits.shape[0] == 1:
+                self._observe(logits)
+                if self.step < len(self.script):
+                    self.natural.append(int(sampled.reshape(-1)[0]))
+                    sampled = torch.full_like(sampled, self.script[self.step])
+                self.step += 1
             return sampled, processed
 
         Sampler.sample = sample
@@ -173,11 +229,13 @@ def one_arm(args) -> None:
     with open(args.transcript) as f:
         session = json.load(f)["session"]
 
-    script = None
+    script = ref_topk = None
     if args.script:
         with open(args.script) as f:
-            script = [t["ids"] for t in json.load(f)["turns"]]
-    forcer = Forcer() if script is not None else None
+            base = json.load(f)["turns"]
+        script = [t["ids"] for t in base]
+        ref_topk = [[(i, l) for i, l in t.get("topk", [])] for t in base]
+    tap = Tap() if (args.force or args.script) else None
 
     if args.audit:
         os.environ["VLLM_VIRTUALKV_AUDIT"] = "1"
@@ -195,8 +253,8 @@ def one_arm(args) -> None:
               enable_prefix_caching=True, max_num_seqs=1,
               trust_remote_code=True, **extra)
     tok = llm.get_tokenizer()
-    if forcer is not None:
-        print(f"[force] patched {forcer.install()}", flush=True)
+    if tap is not None:
+        print(f"[tap] patched {tap.install()}", flush=True)
 
     messages: list[dict] = []
     turns = []
@@ -206,11 +264,13 @@ def one_arm(args) -> None:
         messages.append({"role": "user", "content": msg["content"]})
         prompt = render(tok, messages, args.thinking)
         budget = args.max_tokens
+        if tap is not None:
+            tap.load(None)
         if script is not None:
             if len(turns) >= len(script):
                 break
             budget = len(script[len(turns)])
-            forcer.load(script[len(turns)])
+            tap.load(script[len(turns)], ref_topk[len(turns)])
         if len(tok(prompt).input_ids) + budget > args.max_len:
             break
         params = SamplingParams(temperature=0.0, max_tokens=budget, logprobs=5)
@@ -243,7 +303,12 @@ def one_arm(args) -> None:
             "sel_lp": [round(a, 6) if a is not None else None
                        for a, _ in sel],
             "sel_rank": [b for _, b in sel],
-            "natural": forcer.natural if forcer else [],
+            "natural": tap.natural if tap else [],
+            "ent": [round(x, 6) for x in tap.ent] if tap else [],
+            "nuc": tap.nuc if tap else [],
+            "kl": [round(x, 6) for x in tap.kl] if tap else [],
+            "cov": [round(x, 6) for x in tap.cov] if tap else [],
+            "topk": tap.topk if tap else [],
             "prompt_chars": len(prompt),
         })
         # The transcript's own reply, not the model's: that is the whole
@@ -285,37 +350,59 @@ def compare(ref: dict, arm: dict) -> tuple[int, int, list[float]]:
     return k, len(a), deltas
 
 
-def forced_line(ref: list[dict], turns: list[dict]) -> str:
-    """Per-step damage over every step, since forcing never truncates a turn.
+#: Read against the baseline's own uncertainty. Below ~0.5 nats the model is
+#: effectively committed, so a flip is a destroyed fact rather than a change
+#: of wording; above ~2 nats it was choosing between many acceptable
+#: continuations and a flip says more about English than about residency.
+BANDS = ((0.0, 0.5, "certain"), (0.5, 2.0, "mixed"), (2.0, 1e9, "diffuse"))
 
-    Three numbers, and the third is the one the other two cannot give:
 
-    - **flip** -- steps whose top token is not the baseline's. Free-running,
-      the first of these ends the turn; here they are all counted.
-    - **dlp** -- mean drop in the baseline token's logprob. Magnitude where a
-      flip count is presence/absence.
-    - **rank** -- where the baseline's token actually landed in this arm's
-      distribution. `mean` stays near 1 whenever the damage is rare;
-      `p99`/`max` say how far the token fell when it did fall, which is the
-      difference between "a block of importance was lost" and "how important
-      was the block that was lost".
+def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
+    """Per-step damage over every step, stratified by baseline entropy.
+
+    Forcing never truncates a turn, so every step is scored. The headline is
+    KL against the baseline's distribution rather than a delta on one token:
+    it is weighted by the baseline's own probabilities, so it does not depend
+    on which token happened to be sampled, and a diffuse position cannot
+    dominate it the way a raw logprob delta lets it.
+
+    The bands are the part that answers "how important was what was lost".
+    A flip rate averaged over all positions is close to uninterpretable --
+    it is dominated by wherever the flat distributions fell. The same rate
+    restricted to positions where the baseline was near-certain is not.
     """
-    dlp: list[float] = []
-    ranks: list[int] = []
+    rows: list[tuple[float, float, int, float]] = []
     for a, b in zip(ref, turns):
-        for ra, rb in zip(a.get("sel_lp", []), b.get("sel_lp", [])):
-            if ra is not None and rb is not None:
-                dlp.append(ra - rb)
-        ranks += [r for r in b.get("sel_rank", []) if r is not None]
-    if not ranks:
-        return "no forced steps recorded"
-    ranks_sorted = sorted(ranks)
-    p99 = ranks_sorted[min(len(ranks) - 1, int(0.99 * len(ranks)))]
-    flips = sum(1 for r in ranks if r and r > 1)
-    mean_dlp = sum(dlp) / len(dlp) if dlp else 0.0
-    return (f"flip {flips / len(ranks):.4f} ({flips}/{len(ranks)})  "
-            f"dlp {mean_dlp:+.6f}  rank mean {sum(ranks) / len(ranks):.3f} "
-            f"p99 {p99} max {max(ranks)}")
+        ent = a.get("ent", [])
+        kl = b.get("kl", [])
+        rank = [r for r in b.get("sel_rank", [])]
+        la, lb = a.get("sel_lp", []), b.get("sel_lp", [])
+        for i in range(min(len(ent), len(rank))):
+            d = (la[i] - lb[i]) if i < len(la) and i < len(lb) \
+                and la[i] is not None and lb[i] is not None else 0.0
+            rows.append((ent[i], kl[i] if i < len(kl) else 0.0,
+                         rank[i] or 1, d))
+    out = {"n": len(rows), "bands": []}
+    if not rows:
+        return out
+    out["kl"] = sum(r[1] for r in rows) / len(rows)
+    out["cov"] = (sum(sum(t.get("cov", [])) for t in turns)
+                  / max(sum(len(t.get("cov", [])) for t in turns), 1))
+    out["flip"] = sum(1 for r in rows if r[2] > 1) / len(rows)
+    for lo, hi, label in BANDS:
+        sel = [r for r in rows if lo <= r[0] < hi]
+        if not sel:
+            continue
+        ranks = sorted(r[2] for r in sel)
+        out["bands"].append({
+            "label": label, "n": len(sel),
+            "flip": sum(1 for r in sel if r[2] > 1) / len(sel),
+            "kl": sum(r[1] for r in sel) / len(sel),
+            "dlp": sum(r[3] for r in sel) / len(sel),
+            "p99": ranks[min(len(ranks) - 1, int(0.99 * len(ranks)))],
+            "max": ranks[-1],
+        })
+    return out
 
 
 def report(arms: dict, args: argparse.Namespace) -> None:
@@ -329,7 +416,15 @@ def report(arms: dict, args: argparse.Namespace) -> None:
     for name in ARMS:
         turns = arms[name]["turns"]
         if args.force:
-            print(f"  {name:8s} {forced_line(ref, turns)}")
+            st = forced_stats(ref, turns)
+            print(f"  {name:8s} KL {st.get('kl', 0):.5f} "
+                  f"(cov {st.get('cov', 0):.3f})  "
+                  f"flip {st.get('flip', 0):.4f}  over {st['n']} steps")
+            for band in st["bands"]:
+                print(f"           {band['label']:8s} n={band['n']:5d}  "
+                      f"flip {band['flip']:.4f}  KL {band['kl']:.5f}  "
+                      f"dlp {band['dlp']:+.5f}  "
+                      f"rank p99 {band['p99']:4d} max {band['max']}")
         else:
             agreed = total = 0
             deltas: list[float] = []
