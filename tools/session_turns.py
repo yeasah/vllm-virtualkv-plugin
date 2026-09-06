@@ -81,6 +81,63 @@ SOURCE = ("HuggingFaceH4/ultrachat_200k", "default", "test_sft")
 ROWS = "https://datasets-server.huggingface.co/rows?"
 
 
+def from_trajectory(path: str) -> dict:
+    """A mini-swe-agent trace as an alternating transcript.
+
+    Why an agent trace rather than a chat: the dependency is structural
+    rather than incidental. The task statement sits in the first message and
+    every later turn is still deciding what to do about it, so a recency
+    window that has dropped it is deciding blind -- a needle that is load
+    bearing on every turn, organic rather than planted. Tool outputs are
+    large enough to push it far back, and file contents read early are
+    referenced hundreds of turns later.
+
+    The trace already alternates: an agent turn, then the output of what it
+    ran. Tool results become the `user` side, so no structure is invented.
+    Reasoning, prose and the command are flattened into one assistant message
+    because the point is the token sequence and its recall demands, not
+    faithful tool-call protocol -- and a `tool` role would need the model's
+    template to agree with this trace's, which is a different model's.
+    """
+    with open(path) as f:
+        traj = json.load(f)
+    msgs = traj["messages"]
+
+    def render(x) -> str:
+        parts = []
+        if x.get("reasoning_content"):
+            parts.append(str(x["reasoning_content"]))
+        if x.get("content"):
+            parts.append(str(x["content"]))
+        for tc in x.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            try:
+                cmd = json.loads(fn.get("arguments") or "{}").get("command")
+            except json.JSONDecodeError:
+                cmd = None
+            parts.append(f"$ {cmd}" if cmd else str(fn))
+        return "\n".join(p for p in parts if p)
+
+    session, pending = [], []
+    for x in msgs:
+        role = x.get("role")
+        if role in ("system", "user"):
+            pending.append(render(x))
+        elif role == "tool":
+            pending.append(render(x))
+        elif role == "assistant":
+            text = render(x)
+            if not text:
+                continue
+            # An assistant turn needs something before it to answer.
+            session.append({"role": "user",
+                            "content": "\n\n".join(pending) or "(continue)"})
+            session.append({"role": "assistant", "content": text})
+            pending = []
+    return {"source": f"swe-agent:{traj.get('instance_id', path)}",
+            "conversations": 1, "session": session}
+
+
 def fetch(args) -> int:
     """Chain a few real conversations into one session and write it out.
 
@@ -91,6 +148,15 @@ def fetch(args) -> int:
     the current topic is genuinely droppable and a policy that cannot tell the
     difference wastes its budget on it.
     """
+    if args.traj:
+        out = from_trajectory(args.traj)
+        with open(args.fetch, "w") as f:
+            json.dump(out, f, indent=1)
+        turns = sum(1 for m in out["session"] if m["role"] == "user")
+        chars = sum(len(m["content"]) for m in out["session"])
+        print(f"{args.fetch}: {turns} agent turns, {chars} chars, "
+              f"from {out['source']}")
+        return 0
     ds, cfg, split = SOURCE
     picked, offset = [], args.offset
     while len(picked) < args.chain:
@@ -510,6 +576,8 @@ def main() -> int:
     ap.add_argument("--transcript", default="session.json")
     ap.add_argument("--fetch", default="",
                     help="write a transcript here instead of running")
+    ap.add_argument("--traj", default="",
+                    help="build the transcript from a mini-swe-agent .traj.json")
     ap.add_argument("--chain", type=int, default=3,
                     help="conversations to chain into one session")
     ap.add_argument("--offset", type=int, default=0)
