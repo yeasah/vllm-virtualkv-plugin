@@ -251,7 +251,12 @@ class WorkerPager:
             self.host_slots = slots
             self.group = resolve(runner)
             self.tier = HostTier(self.group.caches(runner.kv_caches), slots)
-            self.guard = ResidencyGuard(self.scheduler)
+            # The guard indexes `coordinator.single_type_managers` by KV
+            # cache group, and on a hybrid ours is not group 0 -- checking
+            # the view against the mamba group's allocation table reports
+            # every paged block as unowned.
+            self.guard = ResidencyGuard(self.scheduler,
+                                        group=self.group.index)
             if self.config is not None and (self.config.policy == "quest"
                                             or self.config.policy
                                             == "massoracle"

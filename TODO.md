@@ -236,6 +236,59 @@ taken below 5k tokens, which `sink-mass` shows is the regime least
 favourable to scoring; 32 KiB/token puts 128k within 4 GiB, so the regime
 where the recency-vs-oracle gap actually opens becomes reachable on one card.
 
+### First contact, 2026-09-06
+
+Partly working, with three blockers found by running it.
+
+**Done and verified on Qwen3.5-9B-exl3:** the spec patch reaches exactly the
+8 full-attention layers; `groups.resolve` finds the paged group; the guard
+validates against the right allocation table; 22 decode steps ran with **zero
+guard violations, all four checks active**.
+
+The real layout justified the resolver more than its design did: **four**
+groups, not two — 24 linear layers split into three `MambaSpec` groups — with
+the paged group at **index 3**. A hardcoded `[0]` pages mamba state silently.
+The guard needed the same fix: it takes a `group` argument that the worker was
+leaving at its default, so every paged block read as unowned.
+
+**Blocker 1: vLLM picks between two GPU model runners per model, not per
+version.** `use_v2_model_runner` is a config property (forced for PCP,
+dspark, multi-KV-group DFlash; overridable by `VLLM_USE_V2_MODEL_RUNNER`) and
+this hybrid defaults to **V1** — `vllm/v1/worker/gpu_model_runner.py`, not the
+`vllm/v1/worker/gpu/model_runner.py` the plugin patches. So the hook installs
+and never fires: the plugin loads, reports nothing, and pages nothing. That is
+the worst available failure mode and it was caught only by `smoke.py` saying
+"nothing moved". Either support V1 or **detect and refuse**.
+
+**Blocker 2: a block is 528 tokens on this model.** vLLM sets the attention
+block size so the attention page is >= the mamba page. That is 33x the block
+size every measurement in this repo has used, and it changes the units the
+plugin thinks in:
+
+- a block-count budget means something 33x different, so `--budget 16` is 8448
+  tokens here and can never bind. The token and percentage budget forms stop
+  being a convenience and become the only safe way to express it.
+- one block is 4 kv heads x 528 tokens x 256 dims x 2 x 2 bytes = 2 MiB per
+  layer, **16.5 MiB across the 8 paged layers**, against 32 KiB on Qwen3-8B.
+  Anything sized in blocks — `required_host_slots` above all — is now sizing
+  in 16.5 MiB units. **The autosize rule needs a byte dimension**: the
+  threshold it derives from is a block count, but the resource it spends is
+  bytes.
+- residency granularity coarsens by the same factor, which cuts against the
+  9x improvement in the union. Which dominates is unmeasured.
+
+**Blocker 3: an OOM kill (exit 137) when the plugin is enabled**, on the
+needle test. Not attributed: KV sizing was byte-identical with and without the
+plugin, the engine finished initialising, and the machine had 10 of 11 GB of
+swap in use after a long day of back-to-back vLLM runs. Retry on a clean box
+before treating it as a plugin bug.
+
+**Still to do regardless: make the hook verify it *fired*.** `install()`
+checks that it patched something; nothing checks that it ran. Three separate
+bugs in one session share that shape — the forcer on a superseded `Sampler`
+class, the pager on a superseded runner class, and a budget that never bound.
+A counter asserted at first request completion catches all three at once.
+
 **The work, which is not a one-liner.** The plugin assumes a single KV cache
 group in six places, and a hybrid has two -- full attention, and linear
 attention state:
