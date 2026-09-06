@@ -132,6 +132,13 @@ class WorkerPager:
         #: Which KV cache group is ours. A hybrid has more than one and only
         #: one is paged; resolved at attach and asserted, never assumed.
         self.group: PagedGroup | None = None
+        #: Times the prepare_attn hook has actually run. `install()` proves
+        #: only that something was patched; on a model whose runner is a
+        #: *different* class of the same name this stays zero while every
+        #: other signal looks healthy. Three separate bugs this repo has hit
+        #: share that shape, so it is counted and asserted rather than hoped
+        #: for -- see `fired_or_raise`.
+        self.fired: int = 0
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -155,6 +162,7 @@ class WorkerPager:
 
         def hooked(runner: GPUModelRunner, input_batch: InputBatch,
                    *args: Any, **kwargs: Any) -> PreparedAttn:
+            self.fired += 1
             self._attach(runner)
             self._wrap_builders(runner)
             self._sync_rows(runner, input_batch)
@@ -164,6 +172,34 @@ class WorkerPager:
 
         hooked._pager_hooked = True
         GPUModelRunner.prepare_attn = hooked
+
+    def fired_or_raise(self) -> None:
+        """Fail loudly if the hook was installed and never ran.
+
+        Installing a patch and executing it are different properties, and
+        this plugin has only ever checked the first. vLLM carries two GPU
+        model runners with the *same class name* --
+        `vllm.v1.worker.gpu_model_runner` and `vllm.v1.worker.gpu.model_runner`
+        -- and picks between them per model configuration: a hybrid whose
+        architecture is not in `DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES` gets
+        the one this does not patch. The result is a plugin that loads,
+        reports nothing, evicts nothing and returns correct output, which is
+        indistinguishable from working until someone checks a counter.
+
+        Call it once a request has completed. Anything that measures or
+        asserts on this pager should call it before believing a clean result.
+        """
+        if self.fired:
+            return
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner as Patched
+        raise RuntimeError(
+            "the pager's prepare_attn hook never ran, so nothing was paged. "
+            f"It patched {Patched.__module__}.GPUModelRunner, but vLLM picks "
+            "between two runners of that name per model -- a hybrid whose "
+            "architecture is absent from DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES "
+            "uses vllm.v1.worker.gpu_model_runner instead. Set "
+            "VLLM_USE_V2_MODEL_RUNNER=1 to force the patched one, or run a "
+            "model this plugin supports")
 
     def _wrap_builders(self, runner: GPUModelRunner) -> None:
         """Interpose on every full-attention metadata builder, once."""
@@ -621,6 +657,8 @@ class WorkerPager:
         }
 
     def summary(self) -> dict[str, Any]:
+        # Reported so a measurement can see it without asking: a run whose
+        # hook never fired has no results, only defaults.
         out = {"steps": self.steps, "copied_in": self.copied_in,
                "copied_out": self.copied_out,
                "missing_host_copy": self.missing_host_copy,
@@ -633,6 +671,7 @@ class WorkerPager:
                              if self.churn_steps else 0.0),
                "last_selection": list(self.last_selection),
                "audit": self._audit_summary(),
+               "hook_fired": self.fired,
                "working_set": self._ws_summary(),
                "summaries": self._summary_summary(),
                "tiers": self._tier_summary(),

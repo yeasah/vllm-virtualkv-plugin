@@ -107,6 +107,10 @@ def one_arm(args):
               "selected_needle": first in chosen,
               "selection_size": len(chosen)}
     if pager is not None:
+        # Installing a hook and running it are different things,
+        # and a pager that never ran reports a clean sheet for a
+        # policy that was never applied.
+        pager.fired_or_raise()
         result["pager"] = pager.summary()
     with open(args.out, "w") as f:
         json.dump(result, f)

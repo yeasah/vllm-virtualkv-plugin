@@ -427,6 +427,9 @@ def one_arm(args) -> None:
 
     result = {"turns": turns}
     if made:
+        # A pager whose hook never ran reports clean numbers for a
+        # policy that was never applied.
+        made[0].fired_or_raise()
         s = made[0].summary()
         result["pager"] = {k: v for k, v in s.items()
                            if k not in ("tier", "guard")}

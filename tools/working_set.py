@@ -83,6 +83,8 @@ def main() -> int:
         if done >= args.turns:
             break
 
+    if made:
+        made[0].fired_or_raise()
     ws = made[0].summary().get("working_set") if made else None
     if not ws:
         print("no working-set rows -- the measurement did not run")

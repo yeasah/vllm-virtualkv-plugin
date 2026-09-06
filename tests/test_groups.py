@@ -90,3 +90,24 @@ def test_missing_groups_refuses():
         kv_cache_config = None
     with pytest.raises(GroupError, match="no kv_cache_groups"):
         resolve(Bare())
+
+
+def test_a_pager_that_never_fired_refuses_to_report():
+    """Installed and executed are different properties.
+
+    vLLM carries two GPU model runners with the same class name and picks
+    between them per model, so a patch can land on the one the live path
+    never touches. Everything else then looks healthy: no error, correct
+    output, a clean guard, and zero transfers -- indistinguishable from a
+    working plugin until someone checks a counter.
+    """
+    import pytest
+    from vllm_virtualkv.worker import WorkerPager
+
+    pager = WorkerPager()
+    assert pager.fired == 0
+    with pytest.raises(RuntimeError, match="never ran"):
+        pager.fired_or_raise()
+
+    pager.fired = 1
+    pager.fired_or_raise()          # having run, it says nothing

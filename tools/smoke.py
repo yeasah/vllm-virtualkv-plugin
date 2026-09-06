@@ -90,6 +90,10 @@ def run_arm(model, args, budget, policy, prompts, params):
     outs = llm.generate(prompts, params)
     result = {"reqs": [capture(o) for o in outs]}
     if pager is not None:
+        # Installing a hook and running it are different things,
+        # and a pager that never ran reports a clean sheet for a
+        # policy that was never applied.
+        pager.fired_or_raise()
         result["pager"] = pager.summary()
     return result
 
