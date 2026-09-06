@@ -103,10 +103,21 @@ def main() -> int:
               f"their pick holds")
         order = [("oracle", "oracle (ceiling)"), ("q8", "8-bit keys"),
                  ("q4", "4-bit keys"), ("q2", "2-bit keys"),
-                 ("bound", "min/max bound"), ("recency", "recency (floor)")]
+                 ("bound", "min/max bound"), ("layer0", "layer-0 queries"),
+                 ("recency", "recency (floor)")]
         for k, label in order:
             if k in sm:
                 print(f"    {label:20s} {sm[k]:.4f}")
+        print(f"\n  under the oracle pick: median layer keeps "
+              f"{sm.get('median_layer', 0):.4f}, worst layer keeps "
+              f"{sm.get('worst_layer', 0):.4f} "
+              f"(layer {sm.get('worst_layer_idx', 0):.0f})")
+    print(f"\n  blocks a single layer demands at epsilon "
+          f"{min((0.1, 0.01, 0.001, 0.0001)):g}: "
+          f"min {ws.get('layer_alone_min', 0):.1f}, "
+          f"mean {ws.get('layer_alone_mean', 0):.1f}, "
+          f"max {ws.get('layer_alone_max', 0):.1f} of {n:.0f} "
+          f"-- against {ws.get('oracle@0.0001', 0):.1f} for the union")
 
     bad = sum(ws.get(f"unsound@{e}", 0)
               for e in ("0.1", "0.01", "0.001", "0.0001"))

@@ -102,6 +102,9 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
     true_sum = torch.zeros(n_full, device=device)
     bound_max = torch.full((n_full,), -float("inf"), device=device)
     est_sum = {b: torch.zeros(n_full, device=device) for b in BITS}
+    #: Per-layer, kept rather than folded in. Aggregating over layers is what
+    #: hides whether a flat union is being driven by a sensitive few.
+    per_layer: list[torch.Tensor] = []
 
     for layer, (q, layer_keys) in enumerate(zip(queries, keys)):
         kv_heads = layer_keys.shape[0]
@@ -121,7 +124,9 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
             return w[..., :n_keys].reshape(
                 *w.shape[:2], n_full, block_size).sum(-1)
 
-        true_sum += mass_of(layer_keys).sum(dim=(0, 1))
+        layer_mass = mass_of(layer_keys).sum(dim=(0, 1))
+        per_layer.append(layer_mass)
+        true_sum += layer_mass
         blocked = layer_keys.reshape(kv_heads, n_full, block_size, -1)
         for bits in BITS:
             est_sum[bits] += mass_of(
@@ -144,9 +149,22 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
     out = {"n_full": n_full, "budget": budget,
            "oracle": captured(true_sum),
            "bound": captured(bound_max),
-           "recency": captured(recency)}
+           "recency": captured(recency),
+           # Rank on layer 0 alone, score on every layer's mass: what a
+           # signal computable before the forward would actually buy.
+           "layer0": captured(per_layer[0])}
     for bits in BITS:
         out[f"q{bits}"] = captured(est_sum[bits])
+
+    # The union question in mass terms: the globally-best pick still has to
+    # serve every layer, and the worst-served layer is what a flat union is
+    # really reporting.
+    pick = torch.topk(true_sum, min(budget, n_full)).indices
+    shares = torch.stack([m[pick].sum() / m.sum().clamp(min=1e-9)
+                          for m in per_layer])
+    out["worst_layer"] = float(shares.min())
+    out["worst_layer_idx"] = int(shares.argmin())
+    out["median_layer"] = float(shares.median())
     return out
 
 
@@ -182,6 +200,11 @@ def working_set_step(caches: Sequence[torch.Tensor], tier, req_id: str,
                  for e in epsilons}
     true_mass_max = torch.zeros(n_full, device=device)
     slack = []
+    #: Blocks each layer *alone* cannot rule out, at the tightest epsilon.
+    #: If the union is being set by a handful of layers this is where it
+    #: shows, and a flat union is then the wrong criterion rather than a
+    #: fatal result.
+    alone: list[int] = []
 
     for layer, (q, layer_keys) in enumerate(zip(queries, keys)):
         kv_heads = layer_keys.shape[0]
@@ -214,7 +237,10 @@ def working_set_step(caches: Sequence[torch.Tensor], tier, req_id: str,
         ceiling = block_size * torch.exp(upper - s_max.unsqueeze(-1))
         for e in epsilons:
             skip_bound[e] &= (ceiling < e).all(dim=1).all(dim=0)
-            skip_true[e] &= (mass < e).all(dim=1).all(dim=0)
+            keep = (mass < e).all(dim=1).all(dim=0)
+            skip_true[e] &= keep
+            if e == min(epsilons):
+                alone.append(n_full - int(keep.sum()))
         true_mass_max = torch.maximum(true_mass_max,
                                       mass.amax(dim=(0, 1)))
         # How many orders of magnitude the bound overstates the truth. A
@@ -225,7 +251,10 @@ def working_set_step(caches: Sequence[torch.Tensor], tier, req_id: str,
                             ).mean()))
 
     out = {"n_full": n_full, "layers": len(keys),
-           "slack": sum(slack) / len(slack)}
+           "slack": sum(slack) / len(slack),
+           "layer_alone_mean": sum(alone) / max(len(alone), 1),
+           "layer_alone_max": max(alone) if alone else 0,
+           "layer_alone_min": min(alone) if alone else 0}
     for e in epsilons:
         out[f"bound@{e:g}"] = n_full - int(skip_bound[e].sum())
         out[f"oracle@{e:g}"] = n_full - int(skip_true[e].sum())
