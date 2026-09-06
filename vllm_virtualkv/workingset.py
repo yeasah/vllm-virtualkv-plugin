@@ -45,7 +45,7 @@ from collections.abc import Sequence
 import torch
 
 from .audit import _keys_for
-from .bounds import block_keys
+from .bounds import LayoutError, block_keys
 
 #: Mass below which a block is treated as not worth fetching. Spread over
 #: several orders of magnitude because the shape of the curve is the result:
@@ -275,4 +275,158 @@ def working_set_step(caches: Sequence[torch.Tensor], tier, req_id: str,
         # A bound that ever rules out a block the truth wanted is not an upper
         # bound, and the whole guarantee rests on that never happening.
         out[f"unsound@{e:g}"] = int((skip_bound[e] & ~skip_true[e]).sum())
+    return out
+
+
+def block_values(cache: torch.Tensor, block_id: int, head_size: int,
+                 head_size_v: int | None = None) -> torch.Tensor:
+    """The values of one block, the other half of what `block_keys` slices."""
+    head_size_v = head_size if head_size_v is None else head_size_v
+    block = cache[block_id]
+    if block.ndim != 3 or block.shape[-1] != head_size + head_size_v:
+        raise LayoutError(
+            f"expected a block shaped [heads, block_size, {head_size} + "
+            f"{head_size_v}] but got {tuple(block.shape)}")
+    return block[..., head_size:]
+
+
+def tier_step(caches: Sequence[torch.Tensor], req_id: str,
+              row: Sequence[int], n_full: int,
+              queries: Sequence[torch.Tensor], block_size: int,
+              head_size: int, scale: float, head_size_v: int | None = None,
+              tail: int = 0, share: float = 0.25, base_bits: int = 16,
+              bits: Sequence[int] = (2, 4, 8)) -> dict | None:
+    """Is a degraded block better than no block, at equal VRAM?
+
+    Dropping a block is not "saving memory instead of being approximate" --
+    it is the *worst* available quantization, zero bits, and it zeroes that
+    block's entire contribution rather than perturbing it. Keeping it badly
+    costs mass times a relative error; dropping it costs mass outright.
+
+    So the arms are given the same bytes, not the same block count. A budget
+    of `share` exact blocks buys either
+
+        drop      `B` blocks exact, the rest absent
+        degrade   `B'` exact plus every remaining block at `n` bits,
+                  where B' = (B - n_full*r) / (1 - r) and r = n/base_bits
+
+    At 4 bits against an fp16 cache the arithmetic is striking on its own:
+    r = 0.25, so a 25% exact budget buys either a quarter of the blocks
+    exactly or *all* of them at 4 bits, for identical memory.
+
+    Scored as relative L2 error of the attention output against exact
+    attention -- not mass captured. Mass is a proxy, and the whole point here
+    is that two arms holding the same mass can be very differently wrong.
+    Both arms select with the same oracle ranking, so this isolates the tier
+    question from the selection question.
+    """
+    if not queries or n_full <= 0 or not scale:
+        return None
+    device = caches[0].device
+    n_keys = n_full * block_size
+    head_v = head_size if head_size_v is None else head_size_v
+
+    def parts(layer: int):
+        """Keys and values for every full block of this layer, plus the tail."""
+        ks, vs = [], []
+        for i in range(n_full):
+            ks.append(block_keys(caches[layer], row[i], head_size,
+                                 head_size_v).float())
+            vs.append(block_values(caches[layer], row[i], head_size,
+                                   head_size_v).float())
+        k = torch.cat(ks, dim=1)
+        v = torch.cat(vs, dim=1)
+        ek = ev = None
+        if tail > 0 and len(row) > n_full:
+            ek = block_keys(caches[layer], row[n_full], head_size,
+                            head_size_v)[:, :tail, :].float()
+            ev = block_values(caches[layer], row[n_full], head_size,
+                              head_size_v)[:, :tail, :].float()
+        return k, v, ek, ev
+
+    # Pass one: a single ranking, since residency is per block and shared
+    # across every layer.
+    rank = torch.zeros(n_full, device=device)
+    for layer, q in enumerate(queries):
+        k, _, ek, _ = parts(layer)
+        kv_heads = k.shape[0]
+        qq = q.float().reshape(kv_heads, -1, q.shape[-1])
+        full = k if ek is None else torch.cat([k, ek], dim=1)
+        w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, full) * scale, -1)
+        rank += w[..., :n_keys].reshape(*w.shape[:2], n_full,
+                                        block_size).sum(-1).sum(dim=(0, 1))
+
+    budget = max(1, int(round(share * n_full)))
+    keep_drop = torch.topk(rank, min(budget, n_full)).indices
+    out = {"n_full": n_full, "budget": budget}
+    err = {("drop", 0): [], **{("degrade", b): [] for b in bits}}
+    exact_for = {0: keep_drop}
+    degraded_for = {}
+    for b in bits:
+        r = b / base_bits
+        # Keeping every remaining block degraded is only affordable when
+        # n_full*r fits the budget. At 8 bits against fp16 it does not, and
+        # an unchecked formula silently hands that arm twice the memory --
+        # which is exactly what it did. Spend on exact blocks first, then
+        # degrade as many of the rest as the remainder buys, then drop.
+        n_exact = int(round((budget - n_full * r) / max(1 - r, 1e-6)))
+        n_exact = max(0, min(n_exact, n_full))
+        n_deg = min(n_full - n_exact, int((budget - n_exact) / max(r, 1e-6)))
+        n_deg = max(0, n_deg)
+        order = torch.topk(rank, n_full).indices
+        exact_for[b] = order[:n_exact]
+        degraded_for[b] = order[n_exact:n_exact + n_deg]
+        out[f"exact@{b}bit"] = n_exact
+        out[f"degraded@{b}bit"] = n_deg
+        out[f"cost@{b}bit"] = n_exact + n_deg * r
+
+    for layer, q in enumerate(queries):
+        k, v, ek, ev = parts(layer)
+        kv_heads = k.shape[0]
+        qq = q.float().reshape(kv_heads, -1, q.shape[-1])
+        fk = k if ek is None else torch.cat([k, ek], dim=1)
+        fv = v if ev is None else torch.cat([v, ev], dim=1)
+        w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, fk) * scale, -1)
+        ref = torch.einsum("kgn,knd->kgd", w, fv)
+        scale_ref = ref.norm(dim=-1).clamp(min=1e-9)
+
+        def score(kk, vv, mask=None):
+            s = torch.einsum("kgd,knd->kgn", qq, kk) * scale
+            if mask is not None:
+                s = s.masked_fill(mask, -float("inf"))
+            o = torch.einsum("kgn,knd->kgd", torch.softmax(s, -1), vv)
+            return float(((o - ref).norm(dim=-1) / scale_ref).mean())
+
+        # drop: everything outside the exact set is invisible
+        gone = torch.ones(n_full, dtype=torch.bool, device=device)
+        gone[keep_drop] = False
+        mask = torch.zeros(fk.shape[1], dtype=torch.bool, device=device)
+        mask[:n_keys] = gone.repeat_interleave(block_size)
+        err[("drop", 0)].append(score(fk, fv, mask.view(1, 1, -1)))
+
+        # degrade: exact for the chosen few, quantized for everything else
+        for b in bits:
+            qk = _quantize(k.reshape(kv_heads, n_full, block_size, -1),
+                           b).reshape(kv_heads, n_keys, -1)
+            qv = _quantize(v.reshape(kv_heads, n_full, block_size, -1),
+                           b).reshape(kv_heads, n_keys, -1)
+            sel = torch.zeros(n_full, dtype=torch.bool, device=device)
+            sel[exact_for[b]] = True
+            held = sel.clone()
+            held[degraded_for[b]] = True
+            keep = sel.repeat_interleave(block_size).unsqueeze(-1)
+            mk = torch.where(keep, k, qk)
+            mv = torch.where(keep, v, qv)
+            if ek is not None:
+                mk = torch.cat([mk, ek], dim=1)
+                mv = torch.cat([mv, ev], dim=1)
+            # Anything the budget could not even hold degraded is absent.
+            m = torch.zeros(mk.shape[1], dtype=torch.bool, device=device)
+            m[:n_keys] = (~held).repeat_interleave(block_size)
+            err[("degrade", b)].append(score(mk, mv, m.view(1, 1, -1)))
+
+    out["drop"] = sum(err[("drop", 0)]) / len(err[("drop", 0)])
+    for b in bits:
+        out[f"degrade@{b}bit"] = sum(err[("degrade", b)]) / len(
+            err[("degrade", b)])
     return out

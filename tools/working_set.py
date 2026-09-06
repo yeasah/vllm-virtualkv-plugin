@@ -121,6 +121,20 @@ def main() -> int:
           f"max {ws.get('layer_alone_max', 0):.1f} of {n:.0f} "
           f"-- against {ws.get('oracle@0.0001', 0):.1f} for the union")
 
+    ti = made[0].summary().get("tiers") if made else None
+    if ti:
+        print(f"\n  equal VRAM, budget {ti['budget']:.0f} exact blocks of "
+              f"{ti['n_full']:.0f} -- relative L2 error of the attention output")
+        print(f"    drop, {ti['budget']:.0f} exact + rest absent      "
+              f"{ti['drop']:.4f}")
+        for b in (8, 4, 2):
+            k = f"degrade@{b}bit"
+            if k in ti:
+                print(f"    {b}-bit, {ti.get(f'exact@{b}bit', 0):4.0f} exact + "
+                      f"{ti.get(f'degraded@{b}bit', 0):4.0f} degraded  "
+                      f"{ti[k]:.4f}   (cost "
+                      f"{ti.get(f'cost@{b}bit', 0):.1f})")
+
     bad = sum(ws.get(f"unsound@{e}", 0)
               for e in ("0.1", "0.01", "0.001", "0.0001"))
     print(f"\n  {'bound stayed sound at every step' if bad == 0 else f'BOUND UNSOUND on {bad} block-steps -- it is not an upper bound'}")
