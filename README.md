@@ -62,12 +62,26 @@ vllm serve <model>
 | `VLLM_VIRTUALKV_BUDGET` | `0` | resident full blocks per request; `0` evicts nothing |
 | `VLLM_VIRTUALKV_POLICY` | `recency` | which blocks to keep |
 | `VLLM_VIRTUALKV_SINK` | `2` | leading blocks always kept |
-| `VLLM_VIRTUALKV_HOST_SLOTS` | `1024` | host tier size, in blocks |
+| `VLLM_VIRTUALKV_HOST_SLOTS` | `1024` | host tier size, in blocks — see below, this one is derived, not chosen |
 | `VLLM_VIRTUALKV_VERIFY` | on | run the residency guard |
 
 Installed but unconfigured, this does nothing: it is loaded into every vLLM
 process on the machine, and a plugin that patched attention because it happened
 to be on the path would be a menace.
+
+**`HOST_SLOTS` is not a free parameter.** A budget is a promise that
+everything not resident is somewhere else, so the tier has to be able to hold
+the difference for every request that can be in flight:
+
+    slots >= max_num_seqs * (ceil(max_model_len / block_size) - budget)
+
+The plugin computes that at startup and warns with the number to set. Falling
+short degrades rather than corrupts — the worker *refuses* an eviction it
+cannot back up and the block stays on the GPU, so the resident set quietly
+exceeds the budget instead of a block being freed while its only copy is the
+one being freed. That refusal heals: the policy re-chooses the block once the
+tier has room. It stops being survivable once the startup context guard is
+relaxed, because then the memory the relaxation was counting on is not there.
 
 `BUDGET=0` with `POLICY=full` is not a no-op — it wires everything up and
 evicts nothing. That is the control arm, and its output must be identical to
@@ -91,7 +105,8 @@ result that does not say which were active is not evidence:
 - **the control arm** (`tests/test_control_arm.py`) — the plugin evicting
   nothing must be bit-identical to not having it. Necessary and not sufficient:
   it cannot catch a bug that only appears once eviction happens.
-- **transfer counters** — `copied_out`, `copied_in`, `missing_host_copy`. The
+- **transfer counters** — `copied_out`, `copied_in`, `missing_host_copy`,
+  `evictions_refused`. The
   guard checks that what happens is *legal*, and a plugin that silently does
   nothing is perfectly legal; twice during development a counter reading zero
   was what caught it.

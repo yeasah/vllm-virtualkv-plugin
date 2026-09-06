@@ -43,7 +43,7 @@ import torch
 
 from . import state as pager_state
 from .guard import ResidencyGuard
-from .hosttier import HostTier
+from .hosttier import HostTier, HostTierFull
 
 if TYPE_CHECKING:
     # Under TYPE_CHECKING only: this package is imported by vLLM's plugin
@@ -84,6 +84,8 @@ class WorkerPager:
         #: disagree. The two sides derive the tail block from this number, so a
         #: lag between them shifts the whole view by a block.
         self.clock_mismatch: int = 0
+        #: evictions vetoed because the host tier had no room for them
+        self.evictions_refused: int = 0
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
 
@@ -237,9 +239,19 @@ class WorkerPager:
                     # whatever the pool left there.
                     self.missing_host_copy += 1
 
-            # 2. copy out, while the chosen blocks are still allocated
+            # 2. copy out, while the chosen blocks are still allocated. A
+            # block that will not fit in the host tier is *refused* rather than
+            # dropped: the manager reads this back and leaves it allocated,
+            # because the alternative to holding VRAM we said we would not hold
+            # is losing the block's only copy.
+            step.refused = set()
             for idx, block_id in step.evicting:
-                self.tier.store((req_id, idx), caches, block_id)
+                try:
+                    self.tier.store((req_id, idx), caches, block_id)
+                except HostTierFull:
+                    step.refused.add(idx)
+                    self.evictions_refused += 1
+                    continue
                 self.copied_out += 1
 
             if not decoding:
@@ -318,6 +330,7 @@ class WorkerPager:
         out = {"steps": self.steps, "copied_in": self.copied_in,
                "copied_out": self.copied_out,
                "missing_host_copy": self.missing_host_copy,
+               "evictions_refused": self.evictions_refused,
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()

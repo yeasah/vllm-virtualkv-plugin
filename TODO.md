@@ -69,6 +69,23 @@ the current query without its keys. Not free — about 4 KiB per block per layer
 in fp16 against a 32 KiB block, out of the same budget — and worth measuring at
 the intended geometry before committing to it.
 
+## `auto-context` — an upstream idea, noted here so it is not lost
+
+Sizing a context by hand against available memory is tedious and gets redone
+every time the model, the quantization or the card changes. `max_model_len =
+auto:N` would ask for the largest context that leaves room for `N` concurrent
+requests.
+
+Most of it already exists upstream: `estimate_max_model_len(vllm_config,
+kv_cache_spec, available_memory)` in `vllm/v1/core/kv_cache_utils.py` binary
+searches for exactly this and restores the config it borrowed, and today it is
+called only to make the "doesn't fit" error message friendlier. `auto:N` is
+close to parsing the suffix and calling it with `available_memory // N`.
+
+Not this plugin's business — it belongs upstream, and it is worth more there
+than here — but it is adjacent enough to record: this plugin's own knobs have
+the same problem, which is `serving-knobs` above.
+
 ## `prefix-caching` — untested, and not merely untested
 
 Every measurement so far ran with prefix caching off. Blocks are hashed and

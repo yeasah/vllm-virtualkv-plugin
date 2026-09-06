@@ -135,6 +135,7 @@ class PagedAttentionManager:
         self.restored: defaultdict[str, list] = defaultdict(list)
         self.blocks_freed = 0
         self.blocks_restored = 0
+        self.evictions_refused = 0
         self.state = pager_state.current()
 
     # -- the per-step hook -------------------------------------------------
@@ -176,9 +177,18 @@ class PagedAttentionManager:
         # worker could copy it to the host. A block freed in the same pass that
         # decided it can be handed to another request before its contents have
         # been read anywhere.
-        due = sorted(self.pending_evictions[request_id])
+        # A block the worker could not copy out must not be freed: its only
+        # copy is still the one on the GPU. Refusing to evict costs VRAM the
+        # budget said we would not spend; freeing anyway costs the block. The
+        # policy re-chooses it next step, so this heals on its own once the
+        # host tier has room.
+        previous = self.state.get(request_id)
+        refused = set(previous.refused) if previous is not None else set()
+        due = [i for i in sorted(self.pending_evictions[request_id])
+               if i not in refused]
         self._free_indices(request_id, due)
         self.evicted[request_id] |= set(due)
+        self.evictions_refused += len(refused)
         self.pending_evictions[request_id] = set()
 
         n_full = min(processed_computed_tokens // self.block_size, len(blocks))

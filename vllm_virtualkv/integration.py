@@ -39,6 +39,45 @@ from .config import Config
 from .manager import build_manager_class, make_spec_class, register
 
 
+def check_host_tier_size(config: Config, vllm_config) -> tuple[int, str | None]:
+    """Is the host tier big enough for what the budget implies?
+
+    Relaxing a residency budget is a promise: everything not resident is
+    somewhere else. The tier has to be able to hold the difference, for every
+    request that can be in flight at once --
+
+        slots >= max_num_seqs * (ceil(max_model_len / block_size) - budget)
+
+    -- or a request will reach a point where it cannot evict any further. That
+    is survivable now (the worker refuses the eviction and the block stays on
+    the GPU) but it means the budget silently stops being the budget, and
+    once the startup context guard is relaxed it stops being survivable at all:
+    the memory the relaxation was counting on will not be there.
+
+    Returns the requirement and a message when it is not met, rather than
+    raising. Under-provisioning today degrades rather than corrupts, and a
+    plugin that refuses to start over a heuristic it computed itself would be
+    worse than one that says what it needs.
+    """
+    if not config.budget:
+        return 0, None                    # evicting nothing needs no tier
+    cache = vllm_config.cache_config
+    block_size = cache.block_size
+    max_len = vllm_config.model_config.max_model_len
+    concurrency = max(1, vllm_config.scheduler_config.max_num_seqs)
+    per_request = max(0, -(-max_len // block_size) - config.budget)
+    needed = concurrency * per_request
+    if config.host_slots >= needed:
+        return needed, None
+    return needed, (
+        f"host tier holds {config.host_slots} blocks but a budget of "
+        f"{config.budget} over {max_len} tokens at {concurrency} concurrent "
+        f"requests can displace {needed}. Evictions past that point will be "
+        f"refused and the resident set will exceed the budget. Set "
+        f"VLLM_VIRTUALKV_HOST_SLOTS={needed}."
+    )
+
+
 def patch_spec(config: Config):
     """Make full-attention layers ask for the paged spec. Returns the original.
 
@@ -53,10 +92,19 @@ def patch_spec(config: Config):
     register(paged_cls, build_manager_class())
     original = Attention.get_kv_cache_spec
 
+    warned = []
+
     def hooked(self, vllm_config):
         spec = original(self, vllm_config)
         if type(spec) is not FullAttentionSpec:
             return spec
+        if not warned:
+            warned.append(True)
+            _, message = check_host_tier_size(config, vllm_config)
+            if message:
+                from vllm.logger import init_logger
+
+                init_logger(__name__).warning("virtualkv: %s", message)
         common = {f.name: getattr(spec, f.name) for f in fields(spec)}
         return paged_cls(**common, budget_blocks=config.budget,
                          sink_blocks=config.sink, policy_name=config.policy)
@@ -95,4 +143,5 @@ def enable(config: Config | None = None, scheduler=None):
     return config, pager, original
 
 
-__all__ = ["Config", "enable", "patch_spec", "unpatch_spec"]
+__all__ = ["Config", "check_host_tier_size", "enable", "patch_spec",
+           "unpatch_spec"]

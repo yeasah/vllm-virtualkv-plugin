@@ -19,6 +19,10 @@ What is published per request per step is small and blunt on purpose:
                forward
     evicting   (index, block id) chosen this step and freed the next -- copy
                these *out* while they are still allocated
+    refused    written back by the worker: indices it could *not* copy out,
+               which the manager must therefore not free. The only channel that
+               runs worker -> scheduler, and it exists because the alternative
+               to a veto is losing a block's contents
 
 Publishing the whole row each step is the obvious thing rather than the cheap
 thing: it is O(context) where a delta would be O(change). That is deliberate
@@ -39,6 +43,8 @@ class RequestStep:
     resident: list[int] = field(default_factory=list)
     restored: list[tuple[int, int]] = field(default_factory=list)
     evicting: list[tuple[int, int]] = field(default_factory=list)
+    #: filled in by the worker, read by the manager on its next pass
+    refused: set[int] = field(default_factory=set)
     num_computed: int = 0
 
 
