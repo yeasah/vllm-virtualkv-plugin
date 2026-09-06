@@ -45,6 +45,7 @@ from . import state as pager_state
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
 from .audit import audit_step
+from .workingset import working_set_step
 from .quest import QueryCapture, QuestScorer
 
 if TYPE_CHECKING:
@@ -118,6 +119,8 @@ class WorkerPager:
         self.last_selection: list[int] = []
         #: per-step attention-mass audit, when config.audit is on
         self.audit_rows: list[dict] = []
+        #: per-step working-set measurement, when config.working_set is on
+        self.ws_rows: list[dict] = []
         self._last_view: dict = {}
         #: this step's decisions, read back by `view` at the metadata builder
         self._plan: StepPlan = {}
@@ -239,7 +242,8 @@ class WorkerPager:
             self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
             if self.config is not None and (self.config.policy == "quest"
-                                            or self.config.audit):
+                                            or self.config.audit
+                                            or self.config.working_set):
                 spec = runner.kv_cache_config.kv_cache_groups[0].kv_cache_spec
                 self.scorer = QuestScorer(
                     head_size=spec.head_size, head_size_v=spec.head_size_v,
@@ -260,7 +264,8 @@ class WorkerPager:
             # This forward's queries have not happened yet; what is held is the
             # previous one's, which is what the ranking is allowed to use.
             self.capture.rotate()
-            if self.config is not None and self.config.audit:
+            if self.config is not None and (self.config.audit
+                                            or self.config.working_set):
                 self._audit_previous(runner)
         self._release_finished()
         table = block_tables[0]
@@ -328,11 +333,13 @@ class WorkerPager:
             seq_len = (len(resident) - 1) * block_size + tail_count
             self._plan[b] = (row, resident, seq_len)
             intended[req_id] = len(resident)
-            if self.config is not None and self.config.audit:
+            if self.config is not None and (self.config.audit
+                                            or self.config.working_set):
                 self._last_view[req_id] = {
                     "row": list(row), "row_index": b,
                     "resident": {i for i in resident if i < computed // block_size},
                     "n_full": computed // block_size, "block_size": block_size,
+                    "tail": computed % block_size + 1,
                     "restored": [i for i, _ in step.restored],
                     "evicted": sorted(step.evicting and
                                       {i for i, _ in step.evicting} or set()),
@@ -453,11 +460,23 @@ class WorkerPager:
         """
         for req_id, saved in list(self._last_view.items()):
             queries = self.capture.for_row(saved["row_index"])
+            if self.config is not None and self.config.working_set:
+                ws = working_set_step(
+                    runner.kv_caches, self.tier, req_id, saved["row"],
+                    saved["resident"], saved["n_full"], queries,
+                    saved["block_size"], self._spec.head_size,
+                    self.capture.scale, self._spec.head_size_v,
+                    tail=saved["tail"])
+                if ws is not None:
+                    self.ws_rows.append(ws)
+            if self.config is not None and not self.config.audit:
+                continue
             row = audit_step(
                 runner.kv_caches, self.tier, req_id, saved["row"],
                 saved["resident"], saved["n_full"], queries,
                 saved["block_size"], self._spec.head_size,
-                self._spec.head_size_v, saved["restored"], saved["evicted"])
+                self._spec.head_size_v, saved["restored"], saved["evicted"],
+                scale=self.capture.scale)
             if row is not None:
                 row["req"] = req_id
                 self.audit_rows.append(row)
@@ -503,6 +522,20 @@ class WorkerPager:
                 f"{req_id}: block ids {bad_ids[:4]} are outside a pool of "
                 f"{num_blocks} blocks")
 
+    def _ws_summary(self) -> dict[str, Any] | None:
+        """Averaged over steps, plus the worst step, since a stall is per step."""
+        if not self.ws_rows:
+            return None
+        n = len(self.ws_rows)
+        keys = [k for k in self.ws_rows[0] if k != "n_full"]
+        out: dict[str, Any] = {"steps": n,
+                               "n_full": sum(r["n_full"] for r in self.ws_rows) / n}
+        for k in keys:
+            out[k] = sum(r[k] for r in self.ws_rows) / n
+        for k in [k for k in keys if k.startswith("bound@")]:
+            out[f"max_{k}"] = max(r[k] for r in self.ws_rows)
+        return out
+
     def _audit_summary(self) -> dict[str, Any] | None:
         if not self.audit_rows:
             return None
@@ -531,6 +564,7 @@ class WorkerPager:
                              if self.churn_steps else 0.0),
                "last_selection": list(self.last_selection),
                "audit": self._audit_summary(),
+               "working_set": self._ws_summary(),
                "clock_mismatch": self.clock_mismatch}
         if self.tier is not None:
             out["tier"] = self.tier.stats()

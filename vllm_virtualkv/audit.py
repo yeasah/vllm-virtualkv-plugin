@@ -65,12 +65,21 @@ def _keys_for(caches: Sequence[torch.Tensor], tier, req_id: str,
 
 def audit_step(caches, tier, req_id, row, resident, n_full, queries,
                block_size, head_size, head_size_v=None,
-               restored=(), evicted=()):
+               restored=(), evicted=(), scale=None):
     """Attention mass the policy left behind, for one decode step.
 
     `queries` must be the queries of the step whose residency is being judged,
     not the next one's -- the point is to score the decision against the
     attention it was actually serving.
+
+    `scale` is the kernel's softmax scale and is not optional in any
+    meaningful sense. The captured query is the one entering
+    `Attention.forward`, before the backend applies `1/sqrt(head_size)`, so
+    softmaxing it raw exponentiates logits an order of magnitude too large.
+    That does not merely rescale the answer: it reports mass off a
+    distribution far sharper than the model's, which understates how much
+    attention sits outside the resident set -- the exact quantity this
+    module exists to report.
     """
     if not queries or n_full <= 0:
         return None
@@ -95,6 +104,8 @@ def audit_step(caches, tier, req_id, row, resident, n_full, queries,
         kv_heads = layer_keys.shape[0]
         q = q.float().reshape(kv_heads, -1, q.shape[-1])      # [kv, group, dim]
         scores = torch.einsum("kgd,knd->kgn", q, layer_keys)
+        if scale is not None:
+            scores = scores * scale
         weights = torch.softmax(scores, dim=-1)
         missed.append(weights[..., out_mask].sum(-1).mean().item())
         fetched.append(weights[..., restored_mask].sum(-1).mean().item())

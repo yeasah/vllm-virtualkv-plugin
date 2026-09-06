@@ -74,7 +74,8 @@ class Config:
 
     def __init__(self, budget=0, sink=2, policy="recency", host_slots=None,
                  verify=True, show_pending=False, head_agg="max",
-                 layer_agg="max", audit=False, score_decay=0.05, recent=None):
+                 layer_agg="max", audit=False, score_decay=0.05, recent=None,
+                 working_set=False):
         #: (kind, value) until an engine exists; `budget_blocks` after.
         self.budget_spec = parse_budget(budget)
         #: Whole blocks. Only meaningful once `resolve` has run, except when
@@ -106,6 +107,7 @@ class Config:
         #: model wanted was resident. Far slower than what it measures; for a
         #: measurement run, never for serving.
         self.audit = audit
+        self.working_set = working_set
         #: Blocks at the end of the context a scored policy keeps regardless
         #: of what it scores them. Attention is heavily recency-weighted and a
         #: generation must see its own recent output; a pure ranking has no
@@ -142,6 +144,8 @@ class Config:
             head_agg=get("HEAD_AGG", "max", str),
             layer_agg=get("LAYER_AGG", "max", str),
             audit=get("AUDIT", False, lambda x: x not in ("0", "false", "no")),
+            working_set=get("WORKING_SET", False,
+                            lambda x: x not in ("0", "false", "no")),
             score_decay=get("SCORE_DECAY", 0.05, float),
             recent=get("RECENT", None, int),
         )

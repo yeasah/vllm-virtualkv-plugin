@@ -146,6 +146,14 @@ class QueryCapture:
         self.previous: list[torch.Tensor] = []
         self.head_size = 0
         self.num_heads = 0
+        #: The softmax scale the kernel will apply. The query captured here is
+        #: the one going *into* Attention.forward, which is unscaled -- the
+        #: backend gets `scale` separately and applies it inside. Anything
+        #: that softmaxes these queries has to apply it too, or it is
+        #: exponentiating logits sqrt(head_size) times too large and every
+        #: mass it reports comes off a far sharper distribution than the
+        #: model's.
+        self.scale: float | None = None
 
     def install(self, model) -> None:
         if self.installed:
@@ -161,6 +169,11 @@ class QueryCapture:
             module.register_forward_pre_hook(self._record, with_kwargs=True)
             self.head_size = getattr(module, "head_size", self.head_size)
             self.num_heads = getattr(module, "num_heads", self.num_heads)
+            impl = getattr(module, "impl", None)
+            if self.scale is None and impl is not None:
+                got = getattr(impl, "scale", None)
+                if got is not None:
+                    self.scale = float(got)
         self.installed = bool(found)
 
     def _record(self, module, args, kwargs):
