@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-virtualkv-plugin"
+version = "0.0.1"
+description = "Virtual memory for a vLLM KV cache: host-backed residency, so a mistaken eviction costs latency instead of correctness"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+# vllm is not a hard dependency on purpose. It ships CUDA-specific wheels and
+# this plugin tracks its main branch, so pinning here would force a pairing on
+# the one project that most needs to follow upstream. See README for the two
+# interfaces this reaches past, one of which upstream is removing.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.entry-points."vllm.general_plugins"]
+virtualkv = "vllm_virtualkv:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_virtualkv*"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
