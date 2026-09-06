@@ -62,21 +62,31 @@ vllm serve <model>
 | `VLLM_VIRTUALKV_BUDGET` | `0` | resident full blocks per request; `0` evicts nothing |
 | `VLLM_VIRTUALKV_POLICY` | `recency` | which blocks to keep |
 | `VLLM_VIRTUALKV_SINK` | `2` | leading blocks always kept |
-| `VLLM_VIRTUALKV_HOST_SLOTS` | `1024` | host tier size, in blocks — see below, this one is derived, not chosen |
+| `VLLM_VIRTUALKV_HOST_SLOTS` | `auto` | host tier size in blocks; derived from the engine unless set |
 | `VLLM_VIRTUALKV_VERIFY` | on | run the residency guard |
 
 Installed but unconfigured, this does nothing: it is loaded into every vLLM
 process on the machine, and a plugin that patched attention because it happened
 to be on the path would be a menace.
 
-**`HOST_SLOTS` is not a free parameter.** A budget is a promise that
-everything not resident is somewhere else, so the tier has to be able to hold
-the difference for every request that can be in flight:
+**`HOST_SLOTS` sizes itself, and that is a rule rather than a convenience.**
+A budget is a promise that everything not resident is somewhere else, so the
+tier has to hold the difference for every request that can be in flight:
 
     slots >= max_num_seqs * (ceil(max_model_len / block_size) - budget)
 
-The plugin computes that at startup and warns with the number to set. Falling
-short degrades rather than corrupts — the worker *refuses* an eviction it
+Every input is something the engine already knows, so the default is that
+number rather than a figure the operator looks up — and re-looks-up whenever
+the model, the card or the concurrency target changes.
+
+*The general form, since it applies to knobs not yet written:* **when a setting
+is checked against a hard threshold, its default should be derived from that
+threshold.** Otherwise the arithmetic gets exported to whoever is running the
+thing, who has strictly less information than the engine does, and it goes
+stale silently. Setting `HOST_SLOTS` explicitly still works, and is warned
+about only when it is too small.
+
+Falling short degrades rather than corrupts — the worker *refuses* an eviction it
 cannot back up and the block stays on the GPU, so the resident set quietly
 exceeds the budget instead of a block being freed while its only copy is the
 one being freed. That refusal heals: the policy re-chooses the block once the

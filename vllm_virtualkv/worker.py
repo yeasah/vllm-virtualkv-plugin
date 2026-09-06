@@ -67,9 +67,14 @@ if TYPE_CHECKING:
 class WorkerPager:
     """Applies the published decisions to the KV cache and the kernel's view."""
 
-    def __init__(self, host_slots: int, scheduler: Scheduler | None = None,
-                 verify: bool = True) -> None:
-        self.host_slots = host_slots
+    def __init__(self, host_slots: int | None = None,
+                 scheduler: Scheduler | None = None, verify: bool = True,
+                 budget: int = 0) -> None:
+        #: None means derive it from the engine at attach time, which is the
+        #: first moment the model length, block size and concurrency are all
+        #: known here.
+        self.host_slots: int | None = host_slots
+        self.budget = budget
         self.scheduler = scheduler
         self.verify = verify
         self.state: pager_state.PagerState = pager_state.current()
@@ -193,8 +198,15 @@ class WorkerPager:
 
     def _attach(self, runner: GPUModelRunner) -> None:
         if self.tier is None:
+            from .integration import required_host_slots
+
             self.runner = runner
-            self.tier = HostTier(runner.kv_caches, self.host_slots)
+            slots = self.host_slots
+            if slots is None:
+                slots = max(1, required_host_slots(self.budget,
+                                                   runner.vllm_config))
+            self.host_slots = slots
+            self.tier = HostTier(runner.kv_caches, slots)
             self.guard = ResidencyGuard(self.scheduler)
 
     def apply(self, runner: GPUModelRunner, batch: InputBatch,

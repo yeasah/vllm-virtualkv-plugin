@@ -27,6 +27,11 @@ Three problems, and the second is the one with a measurement behind it.
 Probably: a pool-level target in bytes or tokens, a per-step fetch ceiling, and
 let the policy derive per-request budgets from what is running.
 
+And an `auto` mode, since `BUDGET` is checked against the pool the same way
+`HOST_SLOTS` is checked against the displaced set — see the rule in the README.
+`BUDGET=auto` would be the largest budget under which `max_num_seqs` requests
+fit, which is arithmetic the engine can do and the operator cannot do as well.
+
 ## `undersized-cache` — you cannot declare a context larger than VRAM
 
 `check_enough_kv_cache_memory` (`vllm/v1/core/kv_cache_utils.py`) raises at

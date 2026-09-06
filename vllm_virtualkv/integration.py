@@ -39,6 +39,23 @@ from .config import Config
 from .manager import build_manager_class, make_spec_class, register
 
 
+def required_host_slots(budget: int, vllm_config) -> int:
+    """Blocks the tier must hold for a budget to mean what it says.
+
+    A budget is a promise that everything not resident is somewhere else, so
+    the tier has to take the difference for every request that can be in
+    flight at once. All three inputs are things the engine already knows and
+    the operator would otherwise be looking up to do this arithmetic by hand.
+    """
+    if not budget:
+        return 0                          # evicting nothing needs no tier
+    block_size = vllm_config.cache_config.block_size
+    max_len = vllm_config.model_config.max_model_len
+    concurrency = max(1, vllm_config.scheduler_config.max_num_seqs)
+    per_request = max(0, -(-max_len // block_size) - budget)
+    return concurrency * per_request
+
+
 def check_host_tier_size(config: Config, vllm_config) -> tuple[int, str | None]:
     """Is the host tier big enough for what the budget implies?
 
@@ -54,27 +71,23 @@ def check_host_tier_size(config: Config, vllm_config) -> tuple[int, str | None]:
     once the startup context guard is relaxed it stops being survivable at all:
     the memory the relaxation was counting on will not be there.
 
-    Returns the requirement and a message when it is not met, rather than
-    raising. Under-provisioning today degrades rather than corrupts, and a
-    plugin that refuses to start over a heuristic it computed itself would be
-    worse than one that says what it needs.
+    Returns the requirement, and a message only when an *explicitly set* tier
+    is too small -- the default derives from this same number, so the message
+    is for someone who overrode it. Under-provisioning degrades rather than
+    corrupts today, and a plugin that refused to start over a heuristic it
+    computed itself would be worse than one that says what it needs.
     """
-    if not config.budget:
-        return 0, None                    # evicting nothing needs no tier
-    cache = vllm_config.cache_config
-    block_size = cache.block_size
+    needed = required_host_slots(config.budget, vllm_config)
+    if config.host_slots is None or config.host_slots >= needed:
+        return needed, None
     max_len = vllm_config.model_config.max_model_len
     concurrency = max(1, vllm_config.scheduler_config.max_num_seqs)
-    per_request = max(0, -(-max_len // block_size) - config.budget)
-    needed = concurrency * per_request
-    if config.host_slots >= needed:
-        return needed, None
     return needed, (
-        f"host tier holds {config.host_slots} blocks but a budget of "
-        f"{config.budget} over {max_len} tokens at {concurrency} concurrent "
-        f"requests can displace {needed}. Evictions past that point will be "
-        f"refused and the resident set will exceed the budget. Set "
-        f"VLLM_VIRTUALKV_HOST_SLOTS={needed}."
+        f"VLLM_VIRTUALKV_HOST_SLOTS was set to {config.host_slots}, but a "
+        f"budget of {config.budget} over {max_len} tokens at {concurrency} "
+        f"concurrent requests can displace {needed} blocks. Evictions past "
+        f"that point are refused, so the resident set will exceed the budget. "
+        f"Unset it to size the tier automatically, or set it to {needed}."
     )
 
 
@@ -138,10 +151,10 @@ def enable(config: Config | None = None, scheduler=None):
     config = config or Config.from_env()
     original = patch_spec(config)
     pager = WorkerPager(host_slots=config.host_slots, scheduler=scheduler,
-                        verify=config.verify)
+                        verify=config.verify, budget=config.budget)
     pager.install()
     return config, pager, original
 
 
 __all__ = ["Config", "check_host_tier_size", "enable", "patch_spec",
-           "unpatch_spec"]
+           "required_host_slots", "unpatch_spec"]

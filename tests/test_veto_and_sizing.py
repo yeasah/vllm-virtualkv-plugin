@@ -88,10 +88,35 @@ def test_an_undersized_tier_is_reported_with_the_number_to_set():
     cfg = Config(budget=16, host_slots=100)
     needed, message = check_host_tier_size(cfg, fake_config(2048, 16, 4))
     assert needed == 448
-    assert message and "VLLM_VIRTUALKV_HOST_SLOTS=448" in message
+    # The number, and the advice that the better fix is not to set it at all.
+    assert message and "448" in message and "Unset it" in message
 
 
 def test_evicting_nothing_needs_no_tier():
     needed, message = check_host_tier_size(
         Config(budget=0, host_slots=1), fake_config(1 << 20, 16, 64))
     assert (needed, message) == (0, None)
+
+
+def test_an_unset_tier_sizes_itself_and_says_nothing():
+    """The point of the rule: a knob checked against a threshold defaults to it.
+
+    An operator has a card, a model and a concurrency target. Every input to
+    this number is something the engine already knows, so making them look it
+    up and type it back is busywork that also gets stale the moment any of the
+    three changes.
+    """
+    needed, message = check_host_tier_size(
+        Config(budget=16, host_slots=None), fake_config(2048, 16, 4))
+    assert needed == 448
+    assert message is None, "auto-sizing should not warn about itself"
+
+
+def test_the_requirement_tracks_the_things_it_is_derived_from():
+    from vllm_virtualkv.integration import required_host_slots
+
+    base = required_host_slots(16, fake_config(2048, 16, 4))
+    assert required_host_slots(16, fake_config(4096, 16, 4)) > base, "context"
+    assert required_host_slots(16, fake_config(2048, 16, 8)) > base, "concurrency"
+    assert required_host_slots(64, fake_config(2048, 16, 4)) < base, "budget"
+    assert required_host_slots(0, fake_config(1 << 20, 16, 64)) == 0
