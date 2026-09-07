@@ -17,6 +17,8 @@ so it is always resident and always last, and the callers append it.
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Sequence
 
 from typing import Protocol
@@ -301,6 +303,41 @@ class Full:
 
     def resident(self, n_full: int, num_computed: int) -> list[int]:
         return list(range(n_full))
+
+
+def positional_prior(n_full: int, front: float = 0.10,
+                     back: float = 0.10) -> list[float]:
+    """A U-shaped weight over block positions, in fractions of the context.
+
+    Attention is reliably U-shaped: heavy at the start, heavy at the end,
+    thin through the middle. This repo has measured both ends of that --
+    two blocks holding 46% of all mass, and a recency window being the one
+    thing no policy beat -- and has been expressing it as two hard
+    reservations, `sink` and `recent`, both counted in *blocks*. That makes
+    them mean different things on different models, and it spends budget in
+    all-or-nothing lumps.
+
+    As a multiplier on a demand signal it does something the reservations
+    cannot: it lets a score overcome the prior when the evidence is strong,
+    instead of fencing off the ends and ranking whatever is left. `quest`
+    lost to `recency` in all nine long-context configurations partly by
+    spending its budget through the middle; this makes the middle expensive
+    rather than forbidden.
+
+    Scale-free by construction -- `front` and `back` are fractions of the
+    context, so the shape holds as a session grows rather than needing a
+    block count retuned per model.
+    """
+    if n_full <= 0:
+        return []
+    fs = max(1.0, front * n_full)
+    bs = max(1.0, back * n_full)
+    out = []
+    for i in range(n_full):
+        head = math.exp(-i / fs)
+        tail = math.exp(-(n_full - 1 - i) / bs)
+        out.append(head + tail)
+    return out
 
 
 def choose(n_full: int, budget: int, sink: int, recent: int,

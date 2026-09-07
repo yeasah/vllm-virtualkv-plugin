@@ -545,6 +545,43 @@ two blocks carrying no information is what the sink literature describes.
 The 2-bit summary still ranks at the oracle ceiling. That result stands; the
 value of ranking well is what shrank.
 
+## `quantisation-fights-granularity` — no escape hatch downward
+
+On a hybrid the attention page must be at least the mamba page, so shrinking
+the attention page makes vLLM *grow* the block:
+
+| KV dtype | block size |
+|---|---|
+| bf16 | 528 |
+| fp8 | 1056 |
+| tq4 | 2048 |
+
+Quantising to buy KV headroom coarsens residency, which is the opposite of
+what one wants and runs the wrong way to escape. The only routes to finer
+granularity are decoupling the two page sizes upstream, or sub-block
+residency underneath vLLM's block.
+
+## `positional-prior` — a U-shape as a multiplier, not a fence
+
+`sink` and `recent` express the U-shape of attention as two hard
+reservations counted in blocks. `policy.positional_prior` expresses it as a
+scale-free weight in fractions of the context, and the worker can multiply a
+scored ranking by it (`VLLM_VIRTUALKV_PRIOR`, 0 disables, off by default).
+
+The difference is what it makes possible rather than what it forbids: a fence
+never offers a middle block at any price, while a multiplier lets a strong
+enough score win one. `quest` lost nine for nine partly by spending budget
+through the middle, so making the middle expensive rather than forbidden is
+the cheapest thing left to try on the scored side.
+
+Note the standalone version is already being swept: with `recency` the budget
+is exactly sink + recent, so sweeping sink at fixed budget *is* sweeping the
+front/back split of a discrete U-curve. The prior only adds something in
+combination with a demand signal.
+
+Untested. It is a positional function, so like recency it needs no fetches of
+its own.
+
 ## `quest-is-a-net-negative` — nine for nine at long context
 
 Qwen3.5-9B-exl3, `apache__druid-15402` at 163 turns, context to 334,718 chars

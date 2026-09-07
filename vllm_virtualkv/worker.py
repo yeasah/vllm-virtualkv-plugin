@@ -45,7 +45,7 @@ from . import state as pager_state
 from .groups import PagedGroup, resolve
 from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
-from .policy import choose
+from .policy import choose, positional_prior
 from .audit import audit_step
 from .workingset import (summary_step, tier_step, true_mass,
                          working_set_step)
@@ -493,6 +493,14 @@ class WorkerPager:
             ranked = self.scorer.rank(req_id, range(n_full), queries)
         if not ranked:
             return
+        if self.config is not None and self.config.prior:
+            # Make the middle expensive rather than forbidden: a strong
+            # enough score still wins a middle block, where a hard sink or
+            # recency reservation would never have offered it.
+            w = positional_prior(n_full, self.config.prior,
+                                 self.config.prior)
+            ranked = sorted(((i, sc * w[i]) for i, sc in ranked
+                             if i < len(w)), key=lambda kv: -kv[1])
         self.ranked += 1
         sink = self.config.sink if self.config else 0
         recent = self.config.recent if self.config else 0
