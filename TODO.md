@@ -157,23 +157,6 @@ survive, magnitudes should not be quoted. **Before more decisions rest on
 that path it needs a test pinning its reconstructed attention against the
 model's own attention output.**
 
-## `auto-context` — an upstream idea, noted here so it is not lost
-
-Sizing a context by hand against available memory is tedious and gets redone
-every time the model, the quantization or the card changes. `max_model_len =
-auto:N` would ask for the largest context that leaves room for `N` concurrent
-requests.
-
-Most of it already exists upstream: `estimate_max_model_len(vllm_config,
-kv_cache_spec, available_memory)` in `vllm/v1/core/kv_cache_utils.py` binary
-searches for exactly this and restores the config it borrowed, and today it is
-called only to make the "doesn't fit" error message friendlier. `auto:N` is
-close to parsing the suffix and calling it with `available_memory // N`.
-
-Not this plugin's business — it belongs upstream, and it is worth more there
-than here — but it is adjacent enough to record: this plugin's own knobs have
-the same problem, which is `serving-knobs` above.
-
 ## `prefix-caching` — first evidence, and it is better than expected
 
 Exercised 2026-09-06 across a six-turn conversation whose prompt grows each
