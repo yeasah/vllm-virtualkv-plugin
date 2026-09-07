@@ -141,3 +141,28 @@ def test_impact_closed_form_equals_dropping_the_block():
         w2 = w[..., keep] / w[..., keep].sum(-1, keepdim=True)
         shift = (torch.einsum("kgn,knd->kgd", w2, v[:, keep]) - o).norm(dim=-1)
         assert torch.allclose(closed[..., b], shift, atol=1e-5)
+
+
+def test_vectorised_gather_matches_the_per_block_loop():
+    """The fast path exists so the oracles can run at fine granularity.
+
+    At block 16 a 64k context is 4096 blocks, so the per-block Python loop
+    costs 147k slices per step across 36 layers against 1440 at block 2112.
+    That is the difference between an oracle run finishing and not -- but
+    only if it returns the same tensors.
+    """
+    import torch
+    from vllm_virtualkv.workingset import _kv_for_layer
+
+    hs = hv = 8
+    nb, bs, heads = 6, 4, 3
+    cache = torch.randn(20, heads, bs, hs + hv)
+    row = [7, 3, 11, 2, 15, 4]
+
+    fast_k, fast_v = _kv_for_layer([cache], None, "r", row, nb, 0, hs, hv,
+                                   set(range(nb)), cache.device)
+    slow_k = torch.cat([cache[row[i]][..., :hs].float() for i in range(nb)], 1)
+    slow_v = torch.cat([cache[row[i]][..., hs:].float() for i in range(nb)], 1)
+
+    assert torch.allclose(fast_k, slow_k)
+    assert torch.allclose(fast_v, slow_v)

@@ -534,13 +534,27 @@ def _kv_for_layer(caches, tier, req_id: str, row, n_full: int, layer: int,
     gigabytes on a long context and OOM'd the ceiling run twice.
     """
     head_v = head_size if head_size_v is None else head_size_v
-    ks, vs = [], []
     cache = caches[layer]
+    if cache.ndim != 4 or cache.shape[-1] != head_size + head_v:
+        return None
+
+    # Gather every resident block in one indexed read. The per-block Python
+    # loop below costs 4096 slices per layer at block 16 -- 147k iterations
+    # a step across 36 layers, against 1440 at block 2112 -- which is the
+    # difference between an oracle run finishing and not.
+    if len(resident) == n_full and n_full <= len(row):
+        idx = torch.as_tensor(list(row[:n_full]), device=cache.device,
+                              dtype=torch.long)
+        blocks = cache[idx].float()          # [blocks, heads, bs, k+v]
+        blocks = blocks.permute(1, 0, 2, 3)  # [heads, blocks, bs, k+v]
+        flat = blocks.reshape(blocks.shape[0], -1, blocks.shape[-1])
+        return flat[..., :head_size].contiguous(), \
+            flat[..., head_size:].contiguous()
+
+    ks, vs = [], []
     for i in range(n_full):
         if i in resident and i < len(row):
             block = cache[row[i]]
-            if block.ndim != 3 or block.shape[-1] != head_size + head_v:
-                return None
             ks.append(block[..., :head_size].float())
             vs.append(block[..., head_size:].float())
         else:
