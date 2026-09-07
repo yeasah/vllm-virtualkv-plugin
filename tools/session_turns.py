@@ -383,7 +383,13 @@ def one_arm(args) -> None:
         #: context that recovery would draw on. This makes that testable on
         #: a dense model, where the size is a knob.
         extra["block_size"] = args.kv_block_size
-    if args.force or args.script or args.segment:
+    if args.force or args.script:
+        # Only forcing needs unchunked prefill: a chunk that completes no
+        # output token still calls the sampler and would eat a script entry.
+        # Segments are independent generates with no script pointer, so they
+        # do not need it -- and raising it there would force a full-context
+        # prefill at peak activation cost, which is what OOM'd a 32k hybrid
+        # run whose KV fit comfortably.
         extra["max_num_batched_tokens"] = max(args.max_len, 8192)
     llm = LLM(model=args.model, max_model_len=args.max_len,
               language_model_only=True,

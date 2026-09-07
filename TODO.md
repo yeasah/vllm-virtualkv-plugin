@@ -193,6 +193,40 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `both-ceilings-tie-recency` — at 40 units of freedom
+
+Same configuration throughout (block 2112, sink 2, budget 12672t, 163 turns,
+~84k context):
+
+| arm | agreement | ranks on |
+|---|---|---|
+| recency | **0.2374** | position only |
+| massoracle | 0.2372 | true attention mass |
+| impactoracle | 0.2052 | true marginal output shift |
+| quest | 0.2256 | bounds estimate of mass |
+
+**Perfect knowledge of attention mass exactly ties a policy that ignores it,
+and perfect knowledge of the marginal output shift is worse.**
+
+Mass is settled: there is no headroom in that quantity, so the bounds, the
+2-bit summary and quest were all estimating an empty target.
+
+The impact result is more interesting and probably indicts the objective
+rather than the idea. `m*(o - v_b)/(1 - m)` is the leave-*one*-out shift, and
+it is being used to pick a set that drops ~85% of blocks. Those effects do
+not compose -- the renormalisation interacts -- so a set assembled from
+individually high-impact blocks can be much worse than a contiguous window.
+The identity extends to sets, `m_D*(o - v_D)/(1 - m_D)`, so a greedy forward
+selection recomputing the residual after each pick would be a real set-oracle
+at O(k*n) per step rather than O(n). Untried.
+
+**The granularity caveat governs all of it.** At 2112 tokens a whole 84k
+context is ~40 blocks. "No selection criterion beats contiguity" and
+"selection cannot be expressed at 40 units of freedom" are the same
+measurement here, and nothing in this table distinguishes them. The premise
+question is open until it is asked at a granularity that can express an
+answer -- see `granularity-rig`.
+
 ## `granularity-rig` — a full-attention model, to separate two conclusions
 
 Every selection result so far is conditioned on an enormous block: 528 tokens
@@ -238,6 +272,18 @@ That leaves the Llama-3.2 line, which is uniform RoPE throughout:
   so it can run the shape immediately.
 
 Suggested split: 1B now for the shape, 3B for the number.
+
+**Qwen/Qwen3-4B-Thinking-2507 is the pick.** `Qwen3ForCausalLM`,
+`use_sliding_window: False`, no `layer_types`, no `no_rope_layers` -- uniform
+full attention with uniform RoPE, and the same family as the original dense
+work so earlier numbers stay comparable. 262144 declared, but 36 layers x 8
+KV heads x 128 head_dim is 144 KiB/token, so the reachable ceiling here is
+64k (9 GiB KV + ~2.4 GiB at 4bpw), giving **4096 blocks at block 16** --
+a hundredfold more than the hybrid runs.
+
+It also *thinks*, which matters: decode volume has already reversed a result
+in this repo (138 tokens/turn against 617), and its benchmark standing blunts
+the "the model could not do the task" objection to whatever comes out.
 
 *Superseded:* SmolLM3-3B at 64k: ~6.2 GiB weights + 4.5 GiB KV, and
 at block 16 that is **4096 blocks** -- a hundredfold more decision units than
