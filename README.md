@@ -59,49 +59,51 @@ retrieval — which is exactly what the needle has and this does not. It also me
 difference between paging and eviction, is exercised by the tests and not by
 the default policy.
 
-The next real work is a demand signal: something resident that says "you will
-want this block that is not here". **That signal is a 2-bit copy of the keys**,
-and the shape of it has been measured rather than assumed. At a budget of 23 of
-90 blocks on a real session, ranking blocks by the mass their pick holds:
+**The demand signal is settled, negatively.** It was the plan when this
+started; it is not viable, and the evidence is not marginal.
 
-| selector | mass captured |
-|---|---|
-| oracle (ceiling) | 0.8812 |
-| **2-bit keys, one step stale — deployable** | **0.8811** |
-| min/max bound | 0.6466 |
-| **sinks + recency (what ships today)** | **0.7907** |
-| recency without sinks | 0.3384 |
+At a fixed budget on a real 84k-token agent session, ranked against a
+plain recency window:
 
-**Read the last two rows together.** Two blocks hold 46% of all attention
-mass, and the shipped policy keeps them; a selector that does not looks 2.3x
-worse than it is, and earlier versions of this table made that mistake.
+| policy | ranks on | agreement |
+|---|---|---|
+| recency | position only | **0.2374** |
+| `massoracle` | *true* attention mass | 0.2372 |
+| `impactoracle` | *true* marginal output shift | 0.2052 |
+| `quest` | bounds estimate of mass | 0.2256 |
 
-**And read the whole table as context-length dependent**, because that turns
-out to matter more. The gap between what recency gets free and what a scored
-policy can reach grows with context: at 25% residency it is +0.097 over 112
-blocks and +0.177 over 346, while recency's own capture decays (0.79 -> 0.71)
-and the oracle holds (0.887 -> 0.889). A recency window is a fixed fraction
-of a growing context. Every number above was taken at a few thousand tokens,
-which is the regime least favourable to scoring and least like the one this
-plugin exists for.
+**Perfect knowledge of attention mass exactly ties a policy that ignores
+it**, and perfect knowledge of the output shift from dropping each block is
+worse. A scored policy lost every one of fourteen configurations across two
+architectures, three budgets, five block sizes and two model families, while
+paying 1.5-2.5x the copy-out traffic and thousands of fetches recency never
+makes. Mass capture -- the objective every signal here estimated -- ordered
+the policies *backwards* end to end.
 
-Three further results in that table. Quantized keys rank as well as the true keys, at
-two bits, because ranking needs order and not accuracy. Quest-style min/max
-bounds — which this project assumed were the answer — rank at 0.64 and cannot
-prove anything either, overstating true mass by 9.4 orders of magnitude. And
-the one-step staleness a policy is forced into by the protocol costs 0.55%
-relative, so almost none of the advantage is lost to it.
+Four confounds were checked and none of them was the cause. Sink allowance
+was equalised in tokens. Decode volume was made representative with
+`--thinking`. The baseline was corrected from a sinkless strawman. And
+granularity was swept 16x on a uniform-RoPE full-attention model, where
+block size is a free parameter rather than forced by a mamba page: the
+picture is flat.
 
-The cost is ~12.5% of KV to carry that signal for the entire context, against
-4 KiB per block per layer for the bounds it replaces.
+Two structural results came out of it that outlive the negative:
 
-**What it cannot do is guarantee.** Full attention at step t attends to all t
-keys, so exact output plus eviction means streaming the whole context per
-token. And skipping provably-negligible blocks does not rescue it: every layer
-has a long thin tail, so at a per-head threshold of 1e-4 even a *single* layer
-alone demands 89.3 of 90 blocks. Residency is therefore statistical, which puts
-this on the same footing as every other KV scheme — it has to beat the
-alternatives, or combine with them.
+- **A fixed-size per-block summary does not scale down.** Quest-style bounds
+  cost `layers x kv_heads x 2 x head_size` whatever the block holds -- 288
+  KiB here -- so below **block size 72** the summary is larger than the block
+  it describes, and you could simply keep the block. A quantized key summary
+  is a flat 6.25% of the block at any size. If a summary is ever wanted
+  again, that is the shape it has to have.
+- **Contiguity beats selection**, and not because selection was estimated
+  badly. Both oracles had exact knowledge and neither won, which points at
+  the *set* rather than the *ranking*: marginal per-block importance does not
+  compose, and a contiguous window may simply be the right answer.
+
+What this leaves is the capacity argument, which never depended on any of
+it: declared context larger than VRAM, paid for in stalls rather than
+quality. That needs prefill residency and the startup check, not a better
+policy.
 
 ## Use
 

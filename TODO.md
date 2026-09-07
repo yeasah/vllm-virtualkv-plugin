@@ -193,6 +193,42 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `demand-signal-closed` — granularity was the last confound, and it is flat
+
+Qwen3-4B-Thinking-2507 (uniform full attention, uniform RoPE, 36 layers, one
+KV group, block size a free parameter), 95 turns, ~56k context, 12672t
+budget, sink pinned at 4224 tokens:
+
+| block | recency | quest |
+|---|---|---|
+| 64 | 0.2147 | 0.2029 |
+| 1056 | 0.2102 | 0.2087 |
+
+A 16.5x change in granularity moves nothing outside noise, and the scored
+policy loses at both. Block 16 and 264 did not run -- bounds are 450% of a
+block at 16 (see below) and vLLM refused 264 -- but 64 to 1056 flat makes a
+different answer at 16 implausible.
+
+That was the last live objection: every earlier selection result sat at ~40
+units of freedom, where "selection does not help" and "selection cannot be
+expressed" are the same measurement. They are now separable, and the answer
+is the same at every granularity that can be built.
+
+**The direction is closed.** quest lost 14 of 14 configurations across two
+architectures, three budgets, five block sizes and two model families; a mass
+oracle ties recency to four decimals; an impact oracle is worse; mass capture
+ordered the policies backwards end to end; the positional prior did nothing.
+Four confounds were checked and cleared along the way -- sink in tokens,
+representative decode volume, a non-strawman baseline, granularity.
+
+The one clean question left is *why*, not *whether*: a set-oracle. Greedy
+forward selection on `m_D*(o - v_D)/(1 - m_D)`, recomputing the residual
+after each pick, is the true ceiling, and the marginal oracles failing does
+not bound it. The interesting outcome would be it converging on something
+close to a contiguous window -- which would turn "recency wins" from an
+empirical fact into an explanation. It does not change the practical
+conclusion either way.
+
 ## `bounds-do-not-scale-down` — the summary outgrows the data at bs<72
 
 `quest` OOM'd on the first fine-granularity run, and the reason is
