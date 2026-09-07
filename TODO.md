@@ -216,7 +216,30 @@ layers) at long context:
 Everything else long-context in the cache is sliding-window or
 linear-hybrid and would reproduce the same problem.
 
-**SmolLM3-3B at 64k is the instrument**: ~6.2 GiB weights + 4.5 GiB KV, and
+**SmolLM3 has 9 NoPE layers and is therefore the wrong instrument here.**
+`no_rope_layers` is 27 with RoPE and 9 without, every fourth. This plugin's
+foundational result -- block order carries no positional meaning at decode --
+holds *because* RoPE is baked into keys at write time. Layers with no
+positional encoding respond to eviction differently, so a granularity study
+there averages two behaviours and cannot attribute its result. Uniform RoPE
+is a requirement, not a preference.
+
+That leaves the Llama-3.2 line, which is uniform RoPE throughout:
+
+- **Llama-3.2-3B** -- 28 layers, 8 KV heads, hd 128 = **112 KiB/token**, so
+  64k costs 7 GiB of KV plus ~1.8 GiB of weights at 4bpw. 128k would be 14
+  GiB and does not fit, making 64k the ceiling and **4096 blocks at block
+  16**. Not cached: needs a download and a quant. This is the one to quote.
+- **Llama-3.2-1B** -- already here as `turboderp/Llama-3.2-1B-Instruct-exl3`
+  (3.0 GiB cached), 131072 context, 32 KiB/token, so 128k fits in 4 GiB and
+  block 16 gives **8192 blocks**. It is also the original needle model, the
+  one case where selection ever paid. Weak, but the granularity question asks
+  whether damage varies with block size, which a small model still exhibits,
+  so it can run the shape immediately.
+
+Suggested split: 1B now for the shape, 3B for the number.
+
+*Superseded:* SmolLM3-3B at 64k: ~6.2 GiB weights + 4.5 GiB KV, and
 at block 16 that is **4096 blocks** -- a hundredfold more decision units than
 the hybrid runs -- with enough model to blunt the capability objection.
 MiniCPM5-1B is the cheap fallback for 128k or very fine blocks, at 1B.
