@@ -577,7 +577,41 @@ what one wants and runs the wrong way to escape. The only routes to finer
 granularity are decoupling the two page sizes upstream, or sub-block
 residency underneath vLLM's block.
 
-## `positional-prior` — a U-shape as a multiplier, not a fence
+## `positional-prior` — measured, no effect
+
+Swept over block size with sink pinned at 4224 tokens (the measured optimum)
+by moving it inversely: 528/8, 1056/4, 2112/2.
+
+| block | recency | quest | quest+prior | prior delta |
+|---|---|---|---|---|
+| 528 | **0.2604** | 0.2429 | 0.2397 | -0.0032 |
+| 1056 | **0.2405** | 0.2232 | 0.2226 | -0.0006 |
+| 2112 | **0.2374** | 0.2256 | 0.2312 | +0.0056 |
+
+All three deltas are +/-0.006 against a noise floor of ~0.03 (the size of the
+unexplained sink=2 dip), so this resolves nothing. The prediction on record --
+that it would help most at 528 where there are the most blocks to reshape, and
+least at 2112 -- was wrong in direction as well as magnitude.
+
+**Recency is 12 for 12** against the scored policy: nine across budgets and
+block sizes, three here.
+
+**Granularity, done properly this time.** Holding sink in *tokens* rather than
+blocks removes the confound that made the earlier sweep unusable and reverses
+its answer -- recency is monotonic in fineness: 0.2604 / 0.2405 / 0.2374 for
+528 / 1056 / 2112. That agrees with the mass-capture curve and with the
+original intuition that 528-token holes are too coarse. Hold it loosely: the
+528->1056 gap is 0.020 and 1056->2112 is 0.003 against a ~0.03 floor, and the
+baselines differ (22129 / 22146 / 22420 generated).
+
+**The instrument's resolution is now the binding constraint.** At 163 turns
+agreement cannot resolve below ~0.03, because a turn scores its identical
+prefix and one early flip discards the whole turn. Anything smaller needs
+per-step scoring, which means forcing -- and forcing does not engage on this
+model (see the MTP note). `massoracle` OOM'd, so the ceiling that would
+calibrate all of these numbers is still missing.
+
+## `positional-prior` — the original idea, for reference
 
 `sink` and `recent` express the U-shape of attention as two hard
 reservations counted in blocks. `policy.positional_prior` expresses it as a
