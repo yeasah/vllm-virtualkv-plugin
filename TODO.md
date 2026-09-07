@@ -236,6 +236,31 @@ taken below 5k tokens, which `sink-mass` shows is the regime least
 favourable to scoring; 32 KiB/token puts 128k within 4 GiB, so the regime
 where the recency-vs-oracle gap actually opens becomes reachable on one card.
 
+### Broken under pressure on a hybrid, 2026-09-06
+
+An aggressive free-running run -- Qwen3.5-9B-exl3, fp8 cache, 26 turns, 3-block
+budget (1584t, ~13% residency), `sink=1` -- **violates the guard on every
+step**: `guard 9932/9932`. `recency` and `quest` returned bit-identical output
+(same agreement, same drift, same 112 transfers), so both degraded into the
+same broken state. Its numbers are artifacts and must not be quoted.
+
+The hybrid needle run was clean at `guard 0` over 22 steps, so this is a
+configuration boundary rather than a general hybrid failure. What differs:
+fp8 cache dtype, `sink=1`, a 3-block budget, and a much longer context.
+Suspect first the `length` check -- `seq_len = (len(resident) - 1) *
+block_size + tail_count` assumes an arithmetic that is far more sensitive at
+528-token blocks than at 16 -- then fp8 changing the cache layout under
+`block_keys`.
+
+Re-run with `VLLM_VIRTUALKV_VERIFY=1` and print `by_check` to see which of the
+four is firing; `session_turns.py` reports only counts, which is why this
+needed a separate look and should be fixed.
+
+**Forcing does not engage on this model at all.** The assertion added the same
+day fired -- "forcing did not take on turn 0 ... the sampler seam is wrong or
+a prefill chunk ate a step" -- so `--force` is dense-only until the tap's
+`logits.shape[0] == 1` guard is reconciled with a model declaring MTP layers.
+
 ### Working on a hybrid, 2026-09-06
 
 `tools/quality.py` on Qwen3.5-9B-exl3, 16k context, 31 blocks of 528 tokens,
