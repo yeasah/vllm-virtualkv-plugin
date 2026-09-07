@@ -252,12 +252,41 @@ budget 8 (~26% residency), needle at block 10, V2 runner forced:
 
 Zero guard violations on every arm.
 
-**Coarse blocks do not break selection.** An oracle finds the needle at
-528-token granularity, which is the same shape as the original 16-token
-result on Llama-3.2-1B: the mechanism can deliver and the policy cannot. The
-33x granularity change is a real problem for budget arithmetic and for host
-tier sizing -- both now fixed -- but it is not fatal to block-based
-residency, and the earlier alarm here was overstated.
+**"Coarse blocks do not break selection" was wrong and is withdrawn.** The
+needle showed only that *one* block can be retained, which is the single
+question granularity does not affect; every other hole it makes is invisible
+to a test whose output is one number.
+
+Measured properly -- token budget fixed, oracle selection, only the block
+size varying, by grouping native 16-token blocks into super-blocks:
+
+| block size | blocks kept | mass captured |
+|---|---|---|
+| 16 | 86 | 0.8892 |
+| 32 | 43 | 0.8711 |
+| 64 | 21 | 0.8413 |
+| 128 | 10 | 0.8103 |
+| 256 | 5 | 0.7466 |
+
+A monotonic 16% loss from 16 to 256 tokens per block, extrapolating to about
+0.70 at 528. Coarse blocking costs roughly a fifth of what a fine-grained
+pager could capture, and this is the *best* case: an oracle ranks super-blocks
+by their true summed mass, where a real policy estimates from a summary.
+
+It is a smooth decline rather than a cliff, and mass has repeatedly failed to
+predict output damage here, so the reading is "meaningful, needs an end-to-end
+check", not "fatal". But it does put the block-based design back in question
+for hybrids, where 528 tokens is forced.
+
+The scale argument is independent and does not rest on the mass numbers: at
+256k context there are only ~485 blocks, fewer decision units than the 1152
+head-layer pairs that must all agree on each one. A 528-token span is a torn
+page, not a dropped vowel.
+
+*Artifact to fix before quoting the 528 row:* `_summary_summary` intersects
+keys across steps, and early steps have too few blocks to form super-blocks at
+the largest factor, so that row is dropped. Re-run from a longer starting
+context rather than extrapolating.
 
 **And the whole stack works on a hybrid**: spec patch, group resolution
 across four groups with mamba state interleaved in `kv_caches`, view

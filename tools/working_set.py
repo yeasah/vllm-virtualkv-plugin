@@ -129,6 +129,15 @@ def main() -> int:
                 print(f"   {sh:6.0%}   {sm.get(f'budget@{sh:g}', 0):6.0f}   "
                       f"{sr:13.4f}   {q2:.4f}   {orc:.4f}   "
                       f"{orc - sr:+.4f}")
+        grains = [(k, v) for k, v in sorted(sm.items()) if k.startswith("grain@")]
+        if grains:
+            print("\n  granularity at a fixed token budget -- oracle "
+                  "selection, only the block size changes\n")
+            print("   block size   blocks kept   mass captured")
+            for k, v in sorted(grains, key=lambda kv: int(kv[0].split("@")[1])):
+                sz = int(k.split("@")[1])
+                print(f"   {sz:10d}   {sm.get(f'grainblocks@{sz}', 0):11.0f}"
+                      f"   {v:.4f}")
         print(f"\n  mass in the first two blocks alone: "
               f"{sm.get('sink_mass', 0):.4f}")
         print(f"\n  under the oracle pick: median layer keeps "

@@ -60,6 +60,10 @@ EPSILONS = (1e-1, 1e-2, 1e-3, 1e-4)
 #: residency decision needs.
 BITS = (8, 4, 2)
 
+#: Super-block factors over the native block size, so one run covers a
+#: range of granularities including the 528 tokens a hybrid forces.
+GROUPINGS = (1, 2, 4, 8, 16, 33)
+
 
 def _quantize(x: torch.Tensor, bits: int) -> torch.Tensor:
     """Per-block, per-channel asymmetric quantization, dequantized in place.
@@ -195,6 +199,26 @@ def summary_step(caches: Sequence[torch.Tensor], tier, req_id: str,
         out[f"q2@{sh:g}"] = captured(est_sum[2], b) if 2 in est_sum else 0.0
         out[f"sinkrec@{sh:g}"] = captured(sr, b)
         out[f"budget@{sh:g}"] = b
+
+    # Granularity, at a *fixed token budget*. Block size is the unit of
+    # every residency decision, and on a hybrid vLLM raises it to 528 tokens
+    # to match the mamba page. A pager that can only cut in 528-token spans
+    # makes enormous holes: the difference between dropping vowels and
+    # tearing out a page. Grouping the native blocks into super-blocks
+    # measures that directly, on one run, with the token budget held equal
+    # so only the granularity changes.
+    for g in GROUPINGS:
+        wide = (n_full + g - 1) // g
+        if wide < 4:
+            continue
+        pad = wide * g - n_full
+        padded = torch.cat([true_sum, true_sum.new_zeros(pad)]) if pad \
+            else true_sum
+        coarse = padded.reshape(wide, g).sum(dim=1)
+        keep = max(1, budget // g)          # same tokens, fewer, bigger units
+        pick = torch.topk(coarse, min(keep, wide)).indices
+        out[f"grain@{g * block_size}"] = float(coarse[pick].sum()) / total
+        out[f"grainblocks@{g * block_size}"] = keep
 
     # The union question in mass terms: the globally-best pick still has to
     # serve every layer, and the worst-served layer is what a flat union is
