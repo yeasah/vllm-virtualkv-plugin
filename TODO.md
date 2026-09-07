@@ -236,6 +236,39 @@ taken below 5k tokens, which `sink-mass` shows is the regime least
 favourable to scoring; 32 KiB/token puts 128k within 4 GiB, so the regime
 where the recency-vs-oracle gap actually opens becomes reachable on one card.
 
+### The long-context rig, measured 2026-09-06
+
+`~/ckpt/Qwen3.5-9B-exl3-4.00bpw-bq`, one 16 GiB card, `VLLM_USE_V2_MODEL_RUNNER=1`:
+
+    max_model_len 131072, bf16 KV, util 0.85   ->  initialises
+    weights 5.48 GiB, KV 5.57 GiB              ->  ~11 GiB of 15.5
+    KV capacity 177,332 tokens                 ->  33 KiB/token, all groups
+    block size 528                             ->  248 blocks at full context
+
+**Do not use fp8.** It halves the attention page, so vLLM doubles the block
+size to 1056 tokens to keep the mamba page equal -- buying memory at the cost
+of granularity, which is the wrong trade for this design and the opposite of
+what one expects. Every earlier estimate here assumed 528 and was wrong under
+fp8.
+
+**Three of the four groups are MambaSpec at the same page size**, so ~75% of
+the KV allocation is linear-attention state. Mamba state is per-*request*, not
+per-528-tokens, so most of that is likely never used -- attention alone would
+be ~8 KiB/token. Worth checking whether vLLM populates those groups sparsely
+before calling it waste, but it is where the memory is.
+
+248 blocks is the first configuration with enough granularity for an
+aggressive budget: 10% is 25 blocks, against the 1.5 blocks that made every
+step violate the guard. It is the rig for the open questions -- the redundancy
+threshold (many small holes vs few large at equal residency), the sink result
+free-running, and the recency-vs-oracle gap which widens with context length
+(+0.049 at 112 blocks, +0.114 at 346).
+
+*Caveat on filling it:* the longest trajectory is ~121k raw and ~60k stripped,
+so 128k needs chained trajectories, which reintroduces the topic-boundary
+artifact that made the UltraChat session undemanding. Prefer one long
+trajectory at whatever length it reaches.
+
 ### Broken under pressure on a hybrid, 2026-09-06
 
 An aggressive free-running run -- Qwen3.5-9B-exl3, fp8 cache, 26 turns, 3-block
