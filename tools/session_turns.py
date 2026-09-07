@@ -361,6 +361,7 @@ def one_arm(args) -> None:
     if args.force or args.script:
         extra["max_num_batched_tokens"] = max(args.max_len, 8192)
     llm = LLM(model=args.model, max_model_len=args.max_len,
+              language_model_only=True,
               gpu_memory_utilization=args.util, enforce_eager=True,
               enable_prefix_caching=True, max_num_seqs=1,
               trust_remote_code=True, **extra)

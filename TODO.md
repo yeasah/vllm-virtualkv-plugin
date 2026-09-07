@@ -545,6 +545,53 @@ two blocks carrying no information is what the sink literature describes.
 The 2-bit summary still ranks at the oracle ceiling. That result stands; the
 value of ranking well is what shrank.
 
+## `quest-is-a-net-negative` — nine for nine at long context
+
+Qwen3.5-9B-exl3, `apache__druid-15402` at 163 turns, context to 334,718 chars
+(~84k tokens), 22k generated, `max_model_len` 262144, util 0.95, sink 1 block:
+
+| budget | block | recency | quest | quest out/in | recency out/in |
+|---|---|---|---|---|---|
+| 6336t | 528 | **0.1708** | 0.1419 | 20981/7539 | 13437/0 |
+| 6336t | 1056 | **0.1377** | 0.1202 | 9554/2884 | 6669/0 |
+| 6336t | 1584 | **0.1830** | 0.1679 | 5490/1080 | 4410/0 |
+| 12672t | 528 | **0.2312** | 0.2052 | 21475/9914 | 11559/0 |
+| 12672t | 1056 | **0.1880** | 0.1576 | 10611/4876 | 5734/0 |
+| 12672t | 1584 | **0.2607** | 0.2224 | 6375/2585 | 3791/0 |
+| 25344t | 528 | **0.3618** | 0.3473 | 17448/9360 | 8080/0 |
+| 25344t | 1056 | **0.3654** | 0.3262 | 9734/5728 | 4007/0 |
+| 25344t | 1584 | **0.4267** | 0.3921 | 6454/3807 | 2645/0 |
+
+**The scored policy loses every time, at 1.5-2.5x the copy-out traffic plus
+thousands of fetches recency never makes.** This is the regime the mass work
+predicted would favour scoring -- long context, genuine distant dependency,
+budgets from 7.5% to 30% -- and it is a net negative there, not merely
+neutral. Three budgets x three block sizes, no exceptions.
+
+Taken with `proxy-is-broken` below, the demand-signal direction as built is
+finished: the objective it optimises does not predict outcome, and pursuing it
+costs transport and quality together.
+
+**The mechanism is solid at this scale**: zero guard violations over ~230k
+guarded steps, 163 turns, 84k-token contexts, on a hybrid with an EXL3
+checkpoint at 262144 max-len. Far harder than any earlier run.
+
+**Do not read the block-size axis**, which is confounded twice. `sink=1` is one
+*block*, so the sink is 528/1056/1584 tokens as the block grows -- and the sink
+dominates everything else measured here. And the baselines differ: `off`
+generated 22129/22146/22410 tokens at the three block sizes, so block size
+changes the output through kernel numerics and each column is scored against a
+different reference. That also explains 1056 coming out worst, which has no
+mechanical story.
+
+**Sobering absolute:** at 30% residency on a real long session, agreement is
+0.36-0.43. Most tokens diverge from the full-context baseline even at the
+loosest budget tested. Whether that costs task success is a separate question
+agreement cannot answer.
+
+*Environment for max-context runs on the hybrid:* language model only, util
+0.95, host tier cap raised to 50%.
+
 ## `proxy-is-broken` — mass capture ordered the policies backwards
 
 The demand-signal work optimises attention mass captured. End to end, on a

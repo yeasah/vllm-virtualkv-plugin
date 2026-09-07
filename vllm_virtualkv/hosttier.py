@@ -92,7 +92,7 @@ class HostTier:
     #: Refuse a tier larger than this share of total host RAM. The
     #: allocation is page-locked and therefore unswappable, so overshooting
     #: does not degrade -- the OOM killer takes the process.
-    MAX_HOST_SHARE = 0.25
+    MAX_HOST_SHARE = 0.50
 
     def __init__(self, kv_caches: Sequence[torch.Tensor], num_slots: int,
                  pin: bool = True) -> None:
