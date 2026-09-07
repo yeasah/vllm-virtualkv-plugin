@@ -504,13 +504,30 @@ def segmented(llm, tok, prompt: str, ref_ids: list[int], k: int,
     on a positional policy, where the resident set depends only on position
     and is therefore unchanged by the segmentation.
     """
-    offset = random.Random(turn).randrange(k) if k > 1 else 0
-    starts = [0]
-    at = offset if offset else k
-    while at < len(ref_ids):
-        starts.append(at)
-        at += k
-    starts.append(len(ref_ids))
+    n = len(ref_ids)
+    rng = random.Random(turn)
+    if k < 0:
+        # Segment *count*: -k cuts, so -1 is free-running and -2 is exactly
+        # one resync. Completions here average 136 tokens against a 384 cap,
+        # so an absolute length near the cap would give zero resyncs on most
+        # turns and one on a few -- mixing the two cases the discontinuity
+        # test has to separate. A count is well defined whatever the turn
+        # length, and the cut positions are still jittered per turn.
+        # Cuts drawn uniformly over the whole turn rather than one per
+        # equal slot: with a single cut, slotting confines it to the first
+        # half, and where the one resync lands is the entire point of the
+        # one-versus-zero comparison.
+        cuts = min(-k - 1, max(0, n - 1))
+        starts = [0] + sorted(rng.sample(range(1, n), cuts)) if cuts else [0]
+    else:
+        offset = rng.randrange(k) if k > 1 else 0
+        starts = [0]
+        at = offset if offset else k
+        while at < n:
+            starts.append(at)
+            at += k
+    starts.append(n)
+    starts = sorted(set(x for x in starts if x <= n))
 
     matched = total = 0
     for j in range(len(starts) - 1):
@@ -756,8 +773,9 @@ def main() -> int:
                     help="leading tokens the truncation keeps")
     ap.add_argument("--segment", type=int, default=0,
                     help="free-run this many tokens between resyncs to the "
-                         "reference; 0 disables. Bounds cascade without the "
-                         "information leak full forcing carries")
+                         "reference; 0 disables. Negative means a segment "
+                         "*count* instead: -1 is free-running, -2 is exactly "
+                         "one resync, which is the transition to test")
     ap.add_argument("--force", action="store_true",
                     help="decode the baseline's tokens in every arm and score "
                          "per step, instead of stopping at first divergence")

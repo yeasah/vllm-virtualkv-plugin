@@ -496,13 +496,19 @@ def true_mass(caches: Sequence[torch.Tensor], tier, req_id: str,
     if not queries or n_full <= 0 or not scale:
         return None
     device = caches[0].device
-    keys = _keys_for(caches, tier, req_id, row, n_full, head_size,
-                     head_size_v, set(resident), device)
-    if keys is None:
-        return None
     n_keys = n_full * block_size
     total = torch.zeros(n_full, device=device)
-    for layer, (q, layer_keys) in enumerate(zip(queries, keys)):
+    #: One layer at a time. `_keys_for` materialises every layer's keys as
+    #: float32 before any are scored, which on a long context is gigabytes
+    #: in a single allocation -- 2.8 GiB at 40 blocks of 2112 tokens across
+    #: 8 layers, which OOM'd the ceiling measurement twice. Only one layer
+    #: is ever needed at once, and the peak drops by the layer count.
+    for layer, q in enumerate(queries):
+        one = _keys_for(caches[layer:layer + 1], tier, req_id, row, n_full,
+                        head_size, head_size_v, set(resident), device)
+        if one is None:
+            return None
+        layer_keys = one[0]
         kv_heads = layer_keys.shape[0]
         if layer_keys.shape[1] < n_keys:
             return None
@@ -516,4 +522,5 @@ def true_mass(caches: Sequence[torch.Tensor], tier, req_id: str,
         w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, full) * scale, -1)
         total += w[..., :n_keys].reshape(*w.shape[:2], n_full,
                                          block_size).sum(-1).sum(dim=(0, 1))
+        del one, layer_keys, full, w
     return [float(x) for x in total]
