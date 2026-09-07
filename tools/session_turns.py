@@ -55,11 +55,14 @@ from gsm8k_turns import ENV as _GSM_ENV, render  # noqa: E402
 #: exists to test -- residency ranked on measured attention mass -- and
 #: `churn` is dropped because its bit-exactness is already established and
 #: it costs a full copy-out/copy-in of the context every step.
-ARMS = ("off", "truncate", "recency", "quest", "massoracle")
+ARMS = ("off", "truncate", "recency", "quest", "massoracle",
+        "impactoracle")
 ENV = {**_GSM_ENV,
        "truncate": {"VLLM_VIRTUALKV": "0"},
        "massoracle": {"VLLM_VIRTUALKV": "1",
-                      "VLLM_VIRTUALKV_POLICY": "massoracle"}}
+                      "VLLM_VIRTUALKV_POLICY": "massoracle"},
+       "impactoracle": {"VLLM_VIRTUALKV": "1",
+                        "VLLM_VIRTUALKV_POLICY": "impactoracle"}}
 
 #: `truncate` is the control the other arms were missing. Recency is very
 #: nearly "use a shorter context", and a comparison in which every arm is

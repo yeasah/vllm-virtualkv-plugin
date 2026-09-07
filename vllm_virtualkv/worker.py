@@ -47,7 +47,8 @@ from .guard import ResidencyGuard
 from .hosttier import HostTier, HostTierFull
 from .policy import choose, positional_prior
 from .audit import audit_step
-from .workingset import (summary_step, tier_step, true_mass,
+from .workingset import (summary_step, tier_step, true_impact,
+                         true_mass,
                          working_set_step)
 from .quest import QueryCapture, QuestScorer
 
@@ -295,7 +296,7 @@ class WorkerPager:
                                         group=self.group.index)
             if self.config is not None and (self.config.policy == "quest"
                                             or self.config.policy
-                                            == "massoracle"
+                                            in ("massoracle", "impactoracle")
                                             or self.config.audit
                                             or self.config.working_set):
                 spec = self.group.spec
@@ -476,7 +477,16 @@ class WorkerPager:
         if not queries:
             self.no_queries += 1
             return
-        if self.config is not None and self.config.policy == "massoracle":
+        if self.config is not None and self.config.policy == "impactoracle":
+            impact = true_impact(
+                caches, self.tier, req_id, row, step.resident, n_full,
+                queries, block_size, self._spec.head_size,
+                self.capture.scale, self._spec.head_size_v,
+                tail=computed % block_size + 1)
+            if impact is None:
+                return
+            ranked = sorted(enumerate(impact), key=lambda kv: -kv[1])
+        elif self.config is not None and self.config.policy == "massoracle":
             # The ceiling: rank on measured mass rather than an estimate of
             # it. Evicted blocks come back from the host tier to be scored,
             # so the ranking covers the whole context and not just what is
@@ -505,7 +515,8 @@ class WorkerPager:
         sink = self.config.sink if self.config else 0
         recent = self.config.recent if self.config else 0
         unknown = [] if (self.config is not None
-                         and self.config.policy == "massoracle") else [
+                         and self.config.policy
+                         in ("massoracle", "impactoracle")) else [
             i for i in range(n_full)
             if (req_id, i) not in self.scorer.bounds]
         self.unscored += len(unknown)
@@ -521,8 +532,8 @@ class WorkerPager:
         # from there would make switching the measurement on change the thing
         # being measured, which it did: an audited `recency` run silently
         # became `quest` and the two reported identical numbers.
-        if self.config is not None and self.config.policy in ("quest",
-                                                             "massoracle"):
+        if self.config is not None and self.config.policy in (
+                "quest", "massoracle", "impactoracle"):
             self.state.desired[req_id] = selection
 
     def _audit_previous(self, runner) -> None:

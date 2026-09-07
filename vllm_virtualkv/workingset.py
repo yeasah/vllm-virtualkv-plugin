@@ -524,3 +524,99 @@ def true_mass(caches: Sequence[torch.Tensor], tier, req_id: str,
                                          block_size).sum(-1).sum(dim=(0, 1))
         del one, layer_keys, full, w
     return [float(x) for x in total]
+
+
+def _kv_for_layer(caches, tier, req_id: str, row, n_full: int, layer: int,
+                  head_size: int, head_size_v, resident, device):
+    """Keys *and* values for one layer, resident from GPU, evicted from host.
+
+    One layer at a time by construction: the whole-model version costs
+    gigabytes on a long context and OOM'd the ceiling run twice.
+    """
+    head_v = head_size if head_size_v is None else head_size_v
+    ks, vs = [], []
+    cache = caches[layer]
+    for i in range(n_full):
+        if i in resident and i < len(row):
+            block = cache[row[i]]
+            if block.ndim != 3 or block.shape[-1] != head_size + head_v:
+                return None
+            ks.append(block[..., :head_size].float())
+            vs.append(block[..., head_size:].float())
+        else:
+            slot = tier._slot.get((req_id, i)) if tier is not None else None
+            if slot is None:
+                return None
+            held = tier.buffers[layer][slot].to(device, non_blocking=False)
+            if held.shape[-1] != head_size + head_v:
+                return None
+            ks.append(held[..., :head_size].float())
+            vs.append(held[..., head_size:].float())
+    return torch.cat(ks, dim=1), torch.cat(vs, dim=1)
+
+
+def true_impact(caches: Sequence[torch.Tensor], tier, req_id: str,
+                row: Sequence[int], resident, n_full: int,
+                queries: Sequence[torch.Tensor], block_size: int,
+                head_size: int, scale: float, head_size_v: int | None = None,
+                tail: int = 0) -> list[float] | None:
+    """How much dropping each block would move the attention output.
+
+    Not attention mass. Mass is what every signal in this repo has estimated
+    -- bounds, the 2-bit summary, quest -- and a mass oracle with perfect
+    knowledge scored 0.2372 against recency's 0.2374, so there is nothing in
+    that quantity to win. Mass says how much weight a block carries; it does
+    not say whether carrying it changes the answer.
+
+    What does is available in closed form. For an output `o = sum_k w_k v_k`,
+    removing block `b` of mass `m_b` and mass-weighted mean value `v_b`
+    renormalises the rest, giving
+
+        delta_o = m_b * (o - v_b) / (1 - m_b)
+
+    so importance is mass *weighted by how far the block's values sit from
+    what attention was already producing*. A heavy block whose values match
+    the centroid is nearly free to drop; a light block pulling the output
+    somewhere else is not. No extra forward passes -- the terms are already
+    in the weights and values.
+
+    This is the oracle that settles the premise rather than the signal. If
+    ranking by it cannot beat recency either, no demand signal can, because
+    this *is* the quantity a demand signal would be trying to predict.
+    """
+    if not queries or n_full <= 0 or not scale:
+        return None
+    device = caches[0].device
+    n_keys = n_full * block_size
+    resident = set(resident)
+    total = torch.zeros(n_full, device=device)
+
+    for layer, q in enumerate(queries):
+        got = _kv_for_layer(caches, tier, req_id, row, n_full, layer,
+                            head_size, head_size_v, resident, device)
+        if got is None:
+            return None
+        k, v = got
+        kv_heads = k.shape[0]
+        if k.shape[1] < n_keys:
+            return None
+        k, v = k[:, :n_keys], v[:, :n_keys]
+        qq = q.float().reshape(kv_heads, -1, q.shape[-1])
+        fk, fv = k, v
+        if tail > 0 and len(row) > n_full:
+            edge = caches[layer][row[n_full]]
+            hv = head_size if head_size_v is None else head_size_v
+            fk = torch.cat([k, edge[..., :head_size][:, :tail, :].float()], 1)
+            fv = torch.cat([v, edge[..., head_size:][:, :tail, :].float()], 1)
+        w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, fk) * scale, -1)
+        o = torch.einsum("kgn,knd->kgd", w, fv)
+
+        wb = w[..., :n_keys].reshape(*w.shape[:2], n_full, block_size)
+        vb = v.reshape(kv_heads, n_full, block_size, -1)
+        m = wb.sum(-1)                                     # [kv, grp, blocks]
+        num = torch.einsum("kgnb,knbd->kgnd", wb, vb)
+        vbar = num / m.clamp(min=1e-12).unsqueeze(-1)
+        delta = (o.unsqueeze(2) - vbar).norm(dim=-1)
+        total += (m * delta / (1 - m).clamp(min=1e-6)).sum(dim=(0, 1))
+        del got, k, v, fk, fv, w, o, wb, vb, num, vbar, delta
+    return [float(x) for x in total]

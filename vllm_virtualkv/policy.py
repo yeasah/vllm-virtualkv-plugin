@@ -288,6 +288,31 @@ class MassOracle:
         return self._fallback.resident(n_full, num_computed)
 
 
+class ImpactOracle:
+    """Residency ranked by how much dropping a block would move the output.
+
+    The other ceiling, and the one that settles the premise. `MassOracle`
+    ranks on attention mass and matched recency exactly (0.2372 against
+    0.2374), so there is no headroom in that quantity for any estimator of
+    it to find. This ranks on `m*(o - v_b)/(1 - m)` -- mass weighted by how
+    far a block's values sit from the output attention was already producing
+    -- which is what a demand signal would actually be trying to predict.
+
+    If this cannot beat recency either, the demand-signal premise is dead
+    rather than merely the signals tried so far.
+    """
+
+    name = "impactoracle"
+
+    def __init__(self, budget: int, sink: int = 2) -> None:
+        self.budget = budget
+        self.sink = sink
+        self._fallback = Recency(budget, sink)
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        return self._fallback.resident(n_full, num_computed)
+
+
 class Full:
     """Everything resident. The control arm, and it must be bit-exact.
 
@@ -373,6 +398,7 @@ def choose(n_full: int, budget: int, sink: int, recent: int,
 
 
 POLICIES: dict[str, type[Policy]] = {
-    p.name: p for p in (Recency, Stress, Churn, Quest, MassOracle, Oracle,
+    p.name: p for p in (Recency, Stress, Churn, Quest, MassOracle, ImpactOracle,
+                        Oracle,
                         OracleLate, Full)
 }

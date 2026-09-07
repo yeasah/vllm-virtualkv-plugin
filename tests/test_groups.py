@@ -111,3 +111,33 @@ def test_a_pager_that_never_fired_refuses_to_report():
 
     pager.fired = 1
     pager.fired_or_raise()          # having run, it says nothing
+
+
+def test_impact_closed_form_equals_dropping_the_block():
+    """`m*(o - v_b)/(1 - m)` is the exact renormalised output shift.
+
+    The importance oracle avoids n extra attention passes per step by using
+    this identity, so it is only worth anything if it is actually equal to
+    what it replaces.
+    """
+    import torch
+
+    torch.manual_seed(0)
+    kv, grp, nb, bs, d = 2, 3, 5, 4, 8
+    n = nb * bs
+    q, k, v = torch.randn(kv, grp, d), torch.randn(kv, n, d), torch.randn(kv, n, d)
+    w = torch.softmax(torch.einsum("kgd,knd->kgn", q, k), -1)
+    o = torch.einsum("kgn,knd->kgd", w, v)
+
+    wb, vb = w.reshape(kv, grp, nb, bs), v.reshape(kv, nb, bs, d)
+    m = wb.sum(-1)
+    vbar = (torch.einsum("kgnb,knbd->kgnd", wb, vb)
+            / m.clamp(min=1e-12).unsqueeze(-1))
+    closed = m * (o.unsqueeze(2) - vbar).norm(dim=-1) / (1 - m).clamp(min=1e-6)
+
+    for b in range(nb):
+        keep = torch.ones(n, dtype=torch.bool)
+        keep[b * bs:(b + 1) * bs] = False
+        w2 = w[..., keep] / w[..., keep].sum(-1, keepdim=True)
+        shift = (torch.einsum("kgn,knd->kgd", w2, v[:, keep]) - o).norm(dim=-1)
+        assert torch.allclose(closed[..., b], shift, atol=1e-5)
