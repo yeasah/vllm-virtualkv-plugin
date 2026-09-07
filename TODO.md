@@ -193,6 +193,39 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `bounds-do-not-scale-down` — the summary outgrows the data at bs<72
+
+`quest` OOM'd on the first fine-granularity run, and the reason is
+structural rather than incidental. Bounds are a *fixed* size per block --
+`layers x kv_heads x 2 x head_size` -- so 36 x 8 x 2 x 128 in fp32 is
+**288 KiB per block whatever the block holds**. The block itself is
+`B x kv_heads x head_size x 2 x 2` bytes:
+
+| block size | block | bounds as % of block |
+|---|---|---|
+| 16 | 64 KiB | **450%** |
+| 64 | 256 KiB | 113% |
+| 72 | 288 KiB | **100% — break-even** |
+| 264 | 1056 KiB | 27% |
+| 1056 | 4224 KiB | 7% |
+
+**Below block size 72 the summary costs more than keeping the block**, so
+bounds are pointless at fine granularity however well they rank. The OOM was
+`torch.stack` over 2553 blocks wanting 720 MiB in one allocation, on top of
+the same again resident.
+
+A 2-bit key summary is `B x 256` bytes -- a flat **6.25%** of the block at
+any size -- so it scales correctly where bounds do not. That is a structural
+argument for quantized summaries over bounds, independent of the ranking
+result (0.6466 against 0.8811) already measured.
+
+Consequence for the sweeps: `quest` cannot run below ~block 64 on this
+model, and the granularity question has to be asked with positional policies
+or with the oracles, which store nothing per block.
+
+Also: the driver raises on any failed arm, so `quest` dying took `recency`'s
+block-16 result with it. Worth making an arm failure non-fatal to the rest.
+
 ## `both-ceilings-tie-recency` — at 40 units of freedom
 
 Same configuration throughout (block 2112, sink 2, budget 12672t, 163 turns,
