@@ -149,6 +149,27 @@ def fetch(args) -> int:
     the current topic is genuinely droppable and a policy that cannot tell the
     difference wastes its budget on it.
     """
+    if args.traj and "," in args.traj:
+        # Several trajectories end to end. This buys *resolution*, not recall
+        # distance -- agreement noise falls as roughly 1/sqrt(turns), so
+        # halving a 0.03 floor wants ~4x the turns and ~4x the runtime -- and
+        # it raises the distractor load, which both the scorer and the model's
+        # own attention have to cope with. Each trajectory keeps its own task
+        # statement, so the dependency structure within a segment is intact
+        # even though nothing depends across a boundary.
+        parts = [from_trajectory(t.strip(),
+                                 keep_reasoning=not args.strip_reasoning)
+                 for t in args.traj.split(",") if t.strip()]
+        out = {"source": " + ".join(p["source"] for p in parts),
+               "conversations": len(parts),
+               "session": [m for p in parts for m in p["session"]]}
+        with open(args.fetch, "w") as f:
+            json.dump(out, f)
+        turns = sum(1 for m in out["session"] if m["role"] == "user")
+        chars = sum(len(m["content"]) for m in out["session"])
+        print(f"{args.fetch}: {len(parts)} trajectories, {turns} turns, "
+              f"{chars} chars")
+        return 0
     if args.traj:
         # Qwen3's template drops prior <think> blocks and keeps only each
         # earlier turn's final answer -- verified, not assumed. Reasoning is
@@ -744,7 +765,8 @@ def main() -> int:
     ap.add_argument("--fetch", default="",
                     help="write a transcript here instead of running")
     ap.add_argument("--traj", default="",
-                    help="build the transcript from a mini-swe-agent .traj.json")
+                    help="build the transcript from mini-swe-agent "
+                         ".traj.json files; comma-separated to concatenate")
     ap.add_argument("--strip-reasoning", action="store_true",
                     help="drop prior reasoning from history, as the chat "
                          "template does in a real agent loop")
