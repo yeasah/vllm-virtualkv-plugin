@@ -342,6 +342,17 @@ def one_arm(args) -> None:
     #: baseline's logprobs taken under the same batching as the arms', so the
     #: per-step deltas are not measuring a change in chunking.
     extra = {}
+    if args.kv_block_size:
+        #: Block size is the unit of every residency decision. A hybrid has
+        #: it forced to 528 tokens to match the mamba page, and mass capture
+        #: falls monotonically as it coarsens -- but mass has repeatedly
+        #: failed to predict output damage here, and there is reason to
+        #: expect the outcome curve to be worse than the mass curve rather
+        #: than proportional: small holes are papered over by the redundancy
+        #: of surrounding text, while a large enough hole removes the
+        #: context that recovery would draw on. This makes that testable on
+        #: a dense model, where the size is a knob.
+        extra["block_size"] = args.kv_block_size
     if args.force or args.script:
         extra["max_num_batched_tokens"] = max(args.max_len, 8192)
     llm = LLM(model=args.model, max_model_len=args.max_len,
@@ -494,6 +505,9 @@ def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
                          rank[i] or 1, d))
     out = {"n": len(rows), "bands": []}
     if not rows:
+        # Zero rows is missing data, not zero damage, and it renders as a
+        # flawless `flip 0.0000` unless it says otherwise.
+        out["empty"] = True
         return out
     out["kl"] = sum(r[1] for r in rows) / len(rows)
     out["cov"] = (sum(sum(t.get("cov", [])) for t in turns)
@@ -528,6 +542,11 @@ def report(arms: dict, args: argparse.Namespace,
         turns = arms[name]["turns"]
         if args.force:
             st = forced_stats(ref, turns)
+            if st.get("empty"):
+                raise SystemExit(
+                    f"arm {name}: no forced steps were recorded, so there is "
+                    f"nothing to report. The tap did not run -- check that "
+                    f"--force reached the arm subprocess.")
             print(f"  {name:8s} KL {st.get('kl', 0):.5f} "
                   f"(cov {st.get('cov', 0):.3f})  "
                   f"flip {st.get('flip', 0):.4f}  over {st['n']} steps")
@@ -600,6 +619,9 @@ def main() -> int:
     ap.add_argument("--max-len", type=int, default=16384)
     ap.add_argument("--max-tokens", type=int, default=0)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--kv-block-size", type=int, default=0,
+                    help="vLLM KV block size; 0 keeps the default. Express "
+                         "the budget in tokens so arms stay comparable")
     ap.add_argument("--block-size", type=int, default=16,
                     help="only to convert a block budget into a token cut")
     ap.add_argument("--thinking", action="store_true")
@@ -659,8 +681,14 @@ def main() -> int:
                    "--max-len", str(args.max_len),
                    "--max-tokens", str(args.max_tokens),
                    "--util", str(args.util),
+                   *(["--kv-block-size", str(args.kv_block_size)]
+                     if args.kv_block_size else []),
                    *(["--audit"] if args.audit else []),
                    *(["--thinking"] if args.thinking else []),
+                   # Forward --force: without it the off arm never installs
+                   # the tap, the reference carries no entropy, and every
+                   # forced statistic silently reports zero.
+                   *(["--force"] if args.force else []),
                    *(["--script", script] if script else []), *cut,
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)

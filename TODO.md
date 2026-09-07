@@ -397,6 +397,46 @@ embeddings, and every tier comparison here used `base_bits=16` because that
 is what AWQ gave -- fp8 is the defensible baseline and halves each degraded
 tier's apparent advantage. Both are fixed by the same move.
 
+## `sink-allowance` — the largest single effect measured, and undertuned
+
+Block size swept end to end on a dense model at a fixed *token* budget
+(2048t), forced decoding, entropy-banded. The first sweep had `sink=2`
+**blocks**, which is 32 tokens at block size 16 and 1024 at block size 512 --
+so it compared budget allocations, not granularities. Equalising the sink at
+1024 tokens:
+
+| block size | KL | flip | `certain` flip |
+|---|---|---|---|
+| 16 (sink 64) | 0.1270 | 0.0504 | 0.0210 |
+| 128 (sink 8) | 0.1231 | 0.0444 | 0.0171 |
+| 512 (sink 2) | 0.0946 | 0.0377 | 0.0139 |
+
+**Raising the sink from 32 to 1024 tokens cut KL from 0.3772 to 0.1270 at
+block size 16** -- a 3x reduction in output damage from one knob at the same
+budget, larger than any policy effect measured to date. `sink` defaults to 2
+blocks and is denominated in blocks, so it silently means 32 tokens on one
+model and 1056 on a hybrid. It should take a token form like `budget` does,
+default far higher, and warn when it eats a large share of the budget.
+
+**Granularity showed no penalty and no cliff.** With allocation matched, 16
+and 128 are indistinguishable and 512 is slightly *better*. The mass curve
+predicted a fifth of capturable mass lost by 528 tokens and none of it
+appeared in the outcome -- the proxy misled again, in the opposite direction
+this time. The residual coarse advantage is likely an artifact: the partial
+tail block is always resident and is not charged against the budget, so
+bs=512 gets up to 512 free recent tokens against bs=16's 16.
+
+Not a test of the redundancy hypothesis (that small holes are papered over by
+surrounding context while large ones destroy the context that would repair
+them). That predicts a *threshold*, and this run sits at ~50% residency on a
+~4000-token context, comfortably on the safe side of any threshold. Re-run at
+10% or less before concluding anything about coarse blocks under pressure.
+
+**Audit every knob denominated in blocks.** `budget` accepts `1024t` and
+`25%`; `sink`, `recent` and `host_slots` do not, and all three have now
+caused a bug: host_slots OOM-killed the process on a hybrid, sink confounded
+this sweep and consumed the entire budget in the hybrid needle run.
+
 ## `sink-mass` — the baseline was a strawman, and that explains the rest
 
 **Two blocks of 112 hold 0.4580 of all attention mass.** The shipped
