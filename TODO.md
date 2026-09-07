@@ -545,6 +545,39 @@ two blocks carrying no information is what the sink literature describes.
 The 2-bit summary still ranks at the oracle ceiling. That result stands; the
 value of ranking well is what shrank.
 
+## `sink-optimum` — about a third of the budget, and the default is far off
+
+Swept on the long rig (Qwen3.5-9B-exl3, druid-15402, 163 turns, ~84k context,
+12672t budget, 528-token blocks, `recency`):
+
+| sink | tokens | % of budget | agreement | drift | turns identical |
+|---|---|---|---|---|---|
+| 1 | 528 | 4% | 0.2312 | 0.026007 | 24 |
+| 2 | 1056 | 8% | 0.1993 | 0.026666 | 15 |
+| 4 | 2112 | 17% | 0.2563 | 0.025229 | 30 |
+| **8** | **4224** | **33%** | **0.2604** | **0.023756** | **35** |
+| 16 | 8448 | 67% | 0.2074 | 0.028295 | 25 |
+
+Peak at a third of the budget on the front of the context. Drift bottoms and
+identical turns peak at the same point.
+
+**The 3x from the dense sweep is corrected to ~13%.** That comparison ran 32
+tokens against 1024 -- almost all of it was escaping a near-zero default, not
+a large effect. Here sink=1 is already 528 tokens and the remaining headroom
+over it is 13% (31% over the worst setting).
+
+**Do not theorise the sink=2 dip.** Agreement is chaotic in the
+configuration: a turn scores its identical *prefix*, so one early flipped
+token discards that whole turn, and a one-block change can trigger it. All
+three columns dip together because all three are driven by the same few
+divergences -- one cause, not three confirmations. Wants a finer grid (3, 5,
+6) before it means anything.
+
+**Actionable:** `sink` defaults to 2 blocks, which is 8% of budget here and
+32 tokens on Qwen3-8B. It should be a fraction of the budget expressed in
+tokens, defaulting near a third, with the same `1024t` / `25%` forms `budget`
+already takes. Same fix `recent` and `host_slots` need.
+
 ## `quantisation-fights-granularity` — no escape hatch downward
 
 On a hybrid the attention page must be at least the mamba page, so shrinking
