@@ -193,6 +193,38 @@ What would settle it is a run where a *second* request demonstrably hits the
 hash of a block the *first* has evicted, with the hit verified rather than
 hoped for. Nothing here proves that case occurred.
 
+## `granularity-rig` — a full-attention model, to separate two conclusions
+
+Every selection result so far is conditioned on an enormous block: 528 tokens
+on the hybrid at bf16, 2112 in the runs that produced the oracle numbers. At
+2112 a whole 84k context is ~40 blocks, so "which blocks you keep barely
+matters" and "selection cannot be *expressed* at this granularity" are
+indistinguishable. A full-attention model has no mamba page to match, so the
+block size is a free parameter and the two can be separated.
+
+Surveyed locally for pure full attention (no sliding window, no linear
+layers) at long context:
+
+| model | ctx | KV/token bf16 | KV at full ctx | note |
+|---|---|---|---|---|
+| **SmolLM3-3B** | 65536 | 72 KiB | 4.5 GiB | all 36 layers full_attention |
+| MiniCPM5-1B | 131072 | 24 KiB | 3.0 GiB | 24 layers, 2 KV heads; exl3 local |
+| Llama-3.2-1B | 131072 | 32 KiB | 4.0 GiB | the original needle model |
+| AFM-4.5B | 65536 | 72 KiB | 4.5 GiB | 9 GiB of weights at bf16, too tight |
+| Phi-4-mini | 131072 | 128 KiB | 16 GiB | KV too large |
+
+Everything else long-context in the cache is sliding-window or
+linear-hybrid and would reproduce the same problem.
+
+**SmolLM3-3B at 64k is the instrument**: ~6.2 GiB weights + 4.5 GiB KV, and
+at block 16 that is **4096 blocks** -- a hundredfold more decision units than
+the hybrid runs -- with enough model to blunt the capability objection.
+MiniCPM5-1B is the cheap fallback for 128k or very fine blocks, at 1B.
+
+Note the transcripts run ~84k tokens, past SmolLM3's 64k, so a run there
+needs fewer turns or a shorter trajectory. The corpus has 2954 agent turns
+across 53 files to choose from.
+
 ## `hybrid-attention` — required, and it gates several retracted conclusions
 
 **Next.** Not a compatibility item: a plugin that cannot page a hybrid model
