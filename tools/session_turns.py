@@ -342,6 +342,11 @@ def one_arm(args) -> None:
     #: baseline's logprobs taken under the same batching as the arms', so the
     #: per-step deltas are not measuring a change in chunking.
     extra = {}
+    if args.kv_dtype:
+        #: fp8 halves the KV bytes, which is both what a deployment would
+        #: run and the only way to reach an aggressive budget at long
+        #: context on one card.
+        extra["kv_cache_dtype"] = args.kv_dtype
     if args.kv_block_size:
         #: Block size is the unit of every residency decision. A hybrid has
         #: it forced to 528 tokens to match the mamba page, and mass capture
@@ -492,6 +497,14 @@ def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
     it is dominated by wherever the flat distributions fell. The same rate
     restricted to positions where the baseline was near-certain is not.
     """
+    #: Damage by position within the turn, which is how the forcing bias
+    #: shows itself. The baseline's tokens were generated *with* the blocks
+    #: this arm evicted, so forcing them in hands back information the
+    #: eviction removed -- and the more of the turn has been forced, the
+    #: more has been handed back. A leak therefore looks like damage
+    #: *falling* with position. Step 0 of each turn is uncontaminated: no
+    #: token of it has been forced yet.
+    by_pos: dict[int, list[int]] = {}
     rows: list[tuple[float, float, int, float]] = []
     for a, b in zip(ref, turns):
         ent = a.get("ent", [])
@@ -503,6 +516,8 @@ def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
                 and la[i] is not None and lb[i] is not None else 0.0
             rows.append((ent[i], kl[i] if i < len(kl) else 0.0,
                          rank[i] or 1, d))
+            bucket = 0 if i == 0 else min(4, 1 + i.bit_length() // 2)
+            by_pos.setdefault(bucket, []).append(rank[i] or 1)
     out = {"n": len(rows), "bands": []}
     if not rows:
         # Zero rows is missing data, not zero damage, and it renders as a
@@ -513,6 +528,10 @@ def forced_stats(ref: list[dict], turns: list[dict]) -> dict:
     out["cov"] = (sum(sum(t.get("cov", [])) for t in turns)
                   / max(sum(len(t.get("cov", [])) for t in turns), 1))
     out["flip"] = sum(1 for r in rows if r[2] > 1) / len(rows)
+    out["by_pos"] = [
+        {"bucket": k, "n": len(v),
+         "flip": sum(1 for r in v if r > 1) / len(v)}
+        for k, v in sorted(by_pos.items())]
     for lo, hi, label in BANDS:
         sel = [r for r in rows if lo <= r[0] < hi]
         if not sel:
@@ -550,6 +569,13 @@ def report(arms: dict, args: argparse.Namespace,
             print(f"  {name:8s} KL {st.get('kl', 0):.5f} "
                   f"(cov {st.get('cov', 0):.3f})  "
                   f"flip {st.get('flip', 0):.4f}  over {st['n']} steps")
+            pos = st.get("by_pos") or []
+            if pos:
+                # Falling flip rate with position is the signature of the
+                # forced tokens re-supplying what eviction removed.
+                cells = "  ".join(f"{p['bucket']}:{p['flip']:.3f}"
+                                  f"(n={p['n']})" for p in pos)
+                print(f"           by position in turn  {cells}")
             for band in st["bands"]:
                 print(f"           {band['label']:8s} n={band['n']:5d}  "
                       f"flip {band['flip']:.4f}  KL {band['kl']:.5f}  "
@@ -619,6 +645,8 @@ def main() -> int:
     ap.add_argument("--max-len", type=int, default=16384)
     ap.add_argument("--max-tokens", type=int, default=0)
     ap.add_argument("--util", type=float, default=0.60)
+    ap.add_argument("--kv-dtype", default="",
+                    help="KV cache dtype, e.g. fp8; empty keeps the default")
     ap.add_argument("--kv-block-size", type=int, default=0,
                     help="vLLM KV block size; 0 keeps the default. Express "
                          "the budget in tokens so arms stay comparable")
@@ -683,6 +711,7 @@ def main() -> int:
                    "--util", str(args.util),
                    *(["--kv-block-size", str(args.kv_block_size)]
                      if args.kv_block_size else []),
+                   *(["--kv-dtype", args.kv_dtype] if args.kv_dtype else []),
                    *(["--audit"] if args.audit else []),
                    *(["--thinking"] if args.thinking else []),
                    # Forward --force: without it the off arm never installs
