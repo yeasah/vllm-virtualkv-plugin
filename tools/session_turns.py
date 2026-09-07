@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -399,7 +400,8 @@ def one_arm(args) -> None:
         params = SamplingParams(temperature=0.0, max_tokens=budget, logprobs=5)
         if args.segment and script is not None:
             turns.append(segmented(llm, tok, prompt, script[len(turns)],
-                                   args.segment, args.max_len))
+                                   args.segment, args.max_len,
+                                   turn=len(turns)))
             messages.append({"role": "assistant",
                              "content": session[i + 1]["content"]})
             if len(turns) >= args.turns:
@@ -466,7 +468,7 @@ def one_arm(args) -> None:
 
 
 def segmented(llm, tok, prompt: str, ref_ids: list[int], k: int,
-              max_len: int) -> dict:
+              max_len: int, turn: int = 0) -> dict:
     """Free-run for `k` tokens, resync to the reference, repeat.
 
     The middle ground between the two measurements that both mislead.
@@ -488,14 +490,34 @@ def segmented(llm, tok, prompt: str, ref_ids: list[int], k: int,
     No sampler patch: each segment is a `generate` on `base + ref[:j*k]`,
     which prefix caching makes cheap and which works where forcing cannot.
 
+    **The resync points are offset per turn, and that is not a detail.**
+    With boundaries at fixed multiples of `k`, a large `k` puts its only
+    resync near the end of the turn -- so "resynced too late to matter" and
+    "never resynced" become the same measurement, exactly where the
+    interesting comparison between leak and no-leak lives. The offset is
+    drawn from the turn index, so it is deterministic (repeatable, and
+    identical across arms, which the comparison depends on) while spreading
+    the boundaries across the interval over 163 turns.
+
     Scored policies are a poor fit at small `k`: a fresh request has no
     query history, so `quest` degrades to its recency fallback. Sweep this
     on a positional policy, where the resident set depends only on position
     and is therefore unchanged by the segmentation.
     """
+    offset = random.Random(turn).randrange(k) if k > 1 else 0
+    starts = [0]
+    at = offset if offset else k
+    while at < len(ref_ids):
+        starts.append(at)
+        at += k
+    starts.append(len(ref_ids))
+
     matched = total = 0
-    for start in range(0, len(ref_ids), k):
-        want = ref_ids[start:start + k]
+    for j in range(len(starts) - 1):
+        start, stop = starts[j], starts[j + 1]
+        want = ref_ids[start:stop]
+        if not want:
+            continue
         head = tok.decode(ref_ids[:start]) if start else ""
         ids = tok(prompt + head).input_ids
         if len(ids) + len(want) > max_len:
@@ -512,7 +534,8 @@ def segmented(llm, tok, prompt: str, ref_ids: list[int], k: int,
     return {"text": "", "ids": list(ref_ids), "lp": [],
             "sel_lp": [], "sel_rank": [], "natural": [], "ent": [],
             "nuc": [], "kl": [], "cov": [], "topk": [],
-            "segmented": {"matched": matched, "total": total, "k": k},
+            "segmented": {"matched": matched, "total": total, "k": k,
+                          "offset": offset, "segments": len(starts) - 1},
             "prompt_chars": len(prompt)}
 
 
@@ -626,7 +649,9 @@ def report(arms: dict, args: argparse.Namespace,
                 continue
             m = sum(x["matched"] for x in seg)
             t = sum(x["total"] for x in seg)
-            print(f"  {name:10s} matched {m / max(t, 1):.4f} ({m}/{t})")
+            segs = sum(x.get("segments", 0) for x in seg)
+            print(f"  {name:10s} matched {m / max(t, 1):.4f} ({m}/{t})"
+                  f"  over {segs} segments")
         return
     for name in running:
         turns = arms[name]["turns"]
