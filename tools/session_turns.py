@@ -358,7 +358,7 @@ def one_arm(args) -> None:
         #: context that recovery would draw on. This makes that testable on
         #: a dense model, where the size is a knob.
         extra["block_size"] = args.kv_block_size
-    if args.force or args.script:
+    if args.force or args.script or args.segment:
         extra["max_num_batched_tokens"] = max(args.max_len, 8192)
     llm = LLM(model=args.model, max_model_len=args.max_len,
               language_model_only=True,
@@ -397,6 +397,14 @@ def one_arm(args) -> None:
         if len(tok(prompt).input_ids) + budget > args.max_len:
             break
         params = SamplingParams(temperature=0.0, max_tokens=budget, logprobs=5)
+        if args.segment and script is not None:
+            turns.append(segmented(llm, tok, prompt, script[len(turns)],
+                                   args.segment, args.max_len))
+            messages.append({"role": "assistant",
+                             "content": session[i + 1]["content"]})
+            if len(turns) >= args.turns:
+                break
+            continue
         out = llm.generate(
             [{"prompt_token_ids": cut} if cut else prompt], params)[0]
         got = out.outputs[0]
@@ -455,6 +463,57 @@ def one_arm(args) -> None:
                            "steps": s["guard"]["steps_checked"]}
     with open(args.out, "w") as f:
         json.dump(result, f)
+
+
+def segmented(llm, tok, prompt: str, ref_ids: list[int], k: int,
+              max_len: int) -> dict:
+    """Free-run for `k` tokens, resync to the reference, repeat.
+
+    The middle ground between the two measurements that both mislead.
+    Free-running truncates -- a turn ends at its first wrong token, so the
+    damage can only be reported as *where* it broke. Forcing does not
+    truncate but leaks: the reference tokens were generated *with* the
+    blocks this arm evicted, so feeding them in hands back the information
+    the eviction removed, and the further into a turn, the more has been
+    handed back.
+
+    Segmenting bounds both. Each segment starts from correct history, so a
+    single wrong token cannot poison the rest of the turn; but within a
+    segment the arm runs on its own output, so forgetting has `k` tokens to
+    make itself felt before the next resync. Sweeping `k` interpolates
+    between the two -- `k=1` is per-step accuracy given perfect history,
+    large `k` approaches free-running -- which is what settles whether the
+    leak is real and how large it is.
+
+    No sampler patch: each segment is a `generate` on `base + ref[:j*k]`,
+    which prefix caching makes cheap and which works where forcing cannot.
+
+    Scored policies are a poor fit at small `k`: a fresh request has no
+    query history, so `quest` degrades to its recency fallback. Sweep this
+    on a positional policy, where the resident set depends only on position
+    and is therefore unchanged by the segmentation.
+    """
+    matched = total = 0
+    for start in range(0, len(ref_ids), k):
+        want = ref_ids[start:start + k]
+        head = tok.decode(ref_ids[:start]) if start else ""
+        ids = tok(prompt + head).input_ids
+        if len(ids) + len(want) > max_len:
+            break
+        got = llm.generate(
+            [{"prompt_token_ids": ids}],
+            SamplingParams(temperature=0.0, max_tokens=len(want)),
+        )[0].outputs[0].token_ids
+        n = 0
+        while n < min(len(got), len(want)) and int(got[n]) == want[n]:
+            n += 1
+        matched += n
+        total += len(want)
+    return {"text": "", "ids": list(ref_ids), "lp": [],
+            "sel_lp": [], "sel_rank": [], "natural": [], "ent": [],
+            "nuc": [], "kl": [], "cov": [], "topk": [],
+            "segmented": {"matched": matched, "total": total, "k": k},
+            "prompt_chars": len(prompt)}
 
 
 def compare(ref: dict, arm: dict) -> tuple[int, int, list[float]]:
@@ -558,6 +617,17 @@ def report(arms: dict, args: argparse.Namespace,
           f"({src['conversations']} conversations), budget {args.budget}")
     print(f"  context grows to {ref[-1]['prompt_chars']} chars, "
           f"{sum(len(t['ids']) for t in ref)} tokens generated\n")
+    if args.segment:
+        print(f"  free-running {args.segment} tokens between resyncs\n")
+        for name in running:
+            seg = [t.get("segmented") for t in arms[name]["turns"]
+                   if t.get("segmented")]
+            if not seg:
+                continue
+            m = sum(x["matched"] for x in seg)
+            t = sum(x["total"] for x in seg)
+            print(f"  {name:10s} matched {m / max(t, 1):.4f} ({m}/{t})")
+        return
     for name in running:
         turns = arms[name]["turns"]
         if args.force:
@@ -659,6 +729,10 @@ def main() -> int:
                     help="run with the prompt cut to this many tokens")
     ap.add_argument("--truncate-sinks", type=int, default=32,
                     help="leading tokens the truncation keeps")
+    ap.add_argument("--segment", type=int, default=0,
+                    help="free-run this many tokens between resyncs to the "
+                         "reference; 0 disables. Bounds cascade without the "
+                         "information leak full forcing carries")
     ap.add_argument("--force", action="store_true",
                     help="decode the baseline's tokens in every arm and score "
                          "per step, instead of stopping at first divergence")
@@ -719,6 +793,7 @@ def main() -> int:
                    # the tap, the reference carries no entropy, and every
                    # forced statistic silently reports zero.
                    *(["--force"] if args.force else []),
+                   *(["--segment", str(args.segment)] if args.segment else []),
                    *(["--script", script] if script else []), *cut,
                    "--arm", name, "--out", path]
             proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -729,7 +804,7 @@ def main() -> int:
                 arms[name] = json.load(f)
             # The baseline supplies the script every other arm decodes, so
             # it has to be the first arm and its file has to outlive the loop.
-            if name == "off" and args.force:
+            if name == "off" and (args.force or args.segment):
                 script = os.path.join(tmp, "script.json")
                 with open(script, "w") as f:
                     json.dump(arms["off"], f)
