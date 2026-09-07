@@ -634,3 +634,89 @@ def true_impact(caches: Sequence[torch.Tensor], tier, req_id: str,
         total += (m * delta / (1 - m).clamp(min=1e-6)).sum(dim=(0, 1))
         del got, k, v, fk, fv, w, o, wb, vb, num, vbar, delta
     return [float(x) for x in total]
+
+
+def true_set(caches: Sequence[torch.Tensor], tier, req_id: str,
+             row: Sequence[int], resident, n_full: int,
+             queries: Sequence[torch.Tensor], block_size: int,
+             head_size: int, scale: float, budget: int,
+             head_size_v: int | None = None, tail: int = 0,
+             cap: int = 40_000_000) -> list[int] | None:
+    """Greedily choose the *set* to keep, not the best blocks individually.
+
+    The marginal oracle ranks blocks by their own leave-one-out shift and
+    loses to recency. That is a flaw in the objective rather than the idea:
+    dropping a set D moves the output by
+
+        ||sum_{b in D} d_b|| / (1 - sum_{b in D} m_b),   d_b = m_b*o - s_b
+
+    with `s_b` the mass-weighted value sum of block b. Both terms are
+    *additive over blocks*, so the cost of a set is a vector sum -- and the
+    numerator is a norm of a sum, not a sum of norms. Blocks whose error
+    vectors oppose each other cancel, and dropping them together is nearly
+    free. Ranking by individual magnitude cannot see that, which is the most
+    likely reason marginal selection underperformed a contiguous window.
+
+    So this is the true ceiling for selection: greedy forward selection,
+    moving one block at a time out of the dropped set, recomputing the
+    residual after each pick. Returns the keep-order, so the existing
+    ranking path can consume it.
+
+    Cost is the reason it runs on coarse blocks only. The candidate tensor
+    is `layers*heads x n_full x head_size`, which is 31 MiB at 53 blocks and
+    half a gigabyte at 875, so `cap` refuses rather than thrashing.
+    """
+    if not queries or n_full <= 0 or not scale or budget <= 0:
+        return None
+    device = caches[0].device
+    n_keys = n_full * block_size
+    resident = set(resident)
+    dv = None
+    ds, ms = [], []
+
+    for layer, q in enumerate(queries):
+        got = _kv_for_layer(caches, tier, req_id, row, n_full, layer,
+                            head_size, head_size_v, resident, device)
+        if got is None:
+            return None
+        k, v = got
+        kv_heads = k.shape[0]
+        if k.shape[1] < n_keys:
+            return None
+        k, v = k[:, :n_keys], v[:, :n_keys]
+        qq = q.float().reshape(kv_heads, -1, q.shape[-1])
+        fk, fv = k, v
+        if tail > 0 and len(row) > n_full:
+            edge = caches[layer][row[n_full]]
+            fk = torch.cat([k, edge[..., :head_size][:, :tail, :].float()], 1)
+            fv = torch.cat([v, edge[..., head_size:][:, :tail, :].float()], 1)
+        w = torch.softmax(torch.einsum("kgd,knd->kgn", qq, fk) * scale, -1)
+        o = torch.einsum("kgn,knd->kgd", w, fv)
+
+        wb = w[..., :n_keys].reshape(*w.shape[:2], n_full, block_size)
+        vb = v.reshape(kv_heads, n_full, block_size, -1)
+        m = wb.sum(-1)                                       # [kv, grp, blk]
+        sblk = torch.einsum("kgnb,knbd->kgnd", wb, vb)
+        d = m.unsqueeze(-1) * o.unsqueeze(2) - sblk          # [kv,grp,blk,dv]
+        dv = d.shape[-1]
+        if (len(queries) * d.shape[0] * d.shape[1] * n_full * dv) > cap:
+            return None
+        ds.append(d.reshape(-1, n_full, dv))
+        ms.append(m.reshape(-1, n_full))
+        del got, k, v, fk, fv, w, o, wb, vb, sblk, d
+
+    dall = torch.cat(ds, 0)                                  # [LH, blk, dv]
+    mall = torch.cat(ms, 0)                                  # [LH, blk]
+    cur_d, cur_m = dall.sum(1), mall.sum(1)
+    avail = torch.ones(n_full, dtype=torch.bool, device=device)
+    keep: list[int] = []
+    for _ in range(min(budget, n_full)):
+        cost = ((cur_d.unsqueeze(1) - dall).norm(dim=-1)
+                / (1 - (cur_m.unsqueeze(1) - mall)).clamp(min=1e-6)).sum(0)
+        cost = cost.masked_fill(~avail, float("inf"))
+        b = int(cost.argmin())
+        keep.append(b)
+        avail[b] = False
+        cur_d = cur_d - dall[:, b]
+        cur_m = cur_m - mall[:, b]
+    return keep

@@ -166,3 +166,41 @@ def test_vectorised_gather_matches_the_per_block_loop():
 
     assert torch.allclose(fast_k, slow_k)
     assert torch.allclose(fast_v, slow_v)
+
+
+def test_greedy_joint_selection_beats_marginal_ranking():
+    """The set cost is a norm of a sum, so error vectors cancel.
+
+    `impactoracle` ranks blocks by their individual leave-one-out shift and
+    lost to recency. Dropping a set costs ||sum d_b|| / (1 - sum m_b), which
+    is not the sum of the individual costs -- blocks whose errors oppose can
+    be dropped together nearly free, and magnitude ranking cannot see it.
+    """
+    import itertools
+
+    import torch
+
+    torch.manual_seed(1)
+    LH, nb, dv, budget = 6, 10, 8, 4
+    d, m = torch.randn(LH, nb, dv), torch.rand(LH, nb) * 0.06
+
+    def cost(keep):
+        drop = [b for b in range(nb) if b not in keep]
+        dd, mm = d[:, drop].sum(1), m[:, drop].sum(1)
+        return float((dd.norm(dim=-1) / (1 - mm).clamp(min=1e-6)).sum())
+
+    best = min(itertools.combinations(range(nb), budget), key=cost)
+
+    cur_d, cur_m, avail, keep = d.sum(1), m.sum(1), list(range(nb)), []
+    for _ in range(budget):
+        b = min(avail, key=lambda b: float(
+            ((cur_d - d[:, b]).norm(dim=-1)
+             / (1 - (cur_m - m[:, b])).clamp(min=1e-6)).sum()))
+        keep.append(b); avail.remove(b)
+        cur_d, cur_m = cur_d - d[:, b], cur_m - m[:, b]
+
+    marginal = sorted(range(nb),
+                      key=lambda b: -float(d[:, b].norm(dim=-1).sum()))[:budget]
+
+    assert cost(keep) <= cost(best) * 1.001, "greedy should reach the optimum"
+    assert cost(marginal) > cost(keep), "marginal ranking should be worse"

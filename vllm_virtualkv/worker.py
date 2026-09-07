@@ -48,6 +48,7 @@ from .hosttier import HostTier, HostTierFull
 from .policy import choose, positional_prior
 from .audit import audit_step
 from .workingset import (summary_step, tier_step, true_impact,
+                         true_set,
                          true_mass,
                          working_set_step)
 from .quest import QueryCapture, QuestScorer
@@ -296,7 +297,7 @@ class WorkerPager:
                                         group=self.group.index)
             if self.config is not None and (self.config.policy == "quest"
                                             or self.config.policy
-                                            in ("massoracle", "impactoracle")
+                                            in ("massoracle", "impactoracle", "setoracle")
                                             or self.config.audit
                                             or self.config.working_set):
                 spec = self.group.spec
@@ -477,7 +478,17 @@ class WorkerPager:
         if not queries:
             self.no_queries += 1
             return
-        if self.config is not None and self.config.policy == "impactoracle":
+        if self.config is not None and self.config.policy == "setoracle":
+            picked = true_set(
+                caches, self.tier, req_id, row, step.resident, n_full,
+                queries, block_size, self._spec.head_size,
+                self.capture.scale, budget, self._spec.head_size_v,
+                tail=computed % block_size + 1)
+            if picked is None:
+                return
+            # Already a keep-order; score descending so `choose` preserves it.
+            ranked = [(b, float(len(picked) - i)) for i, b in enumerate(picked)]
+        elif self.config is not None and self.config.policy == "impactoracle":
             impact = true_impact(
                 caches, self.tier, req_id, row, step.resident, n_full,
                 queries, block_size, self._spec.head_size,
@@ -516,7 +527,7 @@ class WorkerPager:
         recent = self.config.recent if self.config else 0
         unknown = [] if (self.config is not None
                          and self.config.policy
-                         in ("massoracle", "impactoracle")) else [
+                         in ("massoracle", "impactoracle", "setoracle")) else [
             i for i in range(n_full)
             if (req_id, i) not in self.scorer.bounds]
         self.unscored += len(unknown)
@@ -533,7 +544,7 @@ class WorkerPager:
         # being measured, which it did: an audited `recency` run silently
         # became `quest` and the two reported identical numbers.
         if self.config is not None and self.config.policy in (
-                "quest", "massoracle", "impactoracle"):
+                "quest", "massoracle", "impactoracle", "setoracle"):
             self.state.desired[req_id] = selection
 
     def _audit_previous(self, runner) -> None:

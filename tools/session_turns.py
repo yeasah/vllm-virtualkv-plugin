@@ -56,13 +56,15 @@ from gsm8k_turns import ENV as _GSM_ENV, render  # noqa: E402
 #: `churn` is dropped because its bit-exactness is already established and
 #: it costs a full copy-out/copy-in of the context every step.
 ARMS = ("off", "truncate", "recency", "quest", "massoracle",
-        "impactoracle")
+        "impactoracle", "setoracle")
 ENV = {**_GSM_ENV,
        "truncate": {"VLLM_VIRTUALKV": "0"},
        "massoracle": {"VLLM_VIRTUALKV": "1",
                       "VLLM_VIRTUALKV_POLICY": "massoracle"},
        "impactoracle": {"VLLM_VIRTUALKV": "1",
-                        "VLLM_VIRTUALKV_POLICY": "impactoracle"}}
+                        "VLLM_VIRTUALKV_POLICY": "impactoracle"},
+       "setoracle": {"VLLM_VIRTUALKV": "1",
+                     "VLLM_VIRTUALKV_POLICY": "setoracle"}}
 
 #: `truncate` is the control the other arms were missing. Recency is very
 #: nearly "use a shorter context", and a comparison in which every arm is

@@ -313,6 +313,32 @@ class ImpactOracle:
         return self._fallback.resident(n_full, num_computed)
 
 
+class SetOracle:
+    """Residency chosen as a *set*, by greedy joint minimisation.
+
+    The last question the demand-signal work leaves: the marginal oracle
+    ranks blocks by their own leave-one-out shift, and dropping a set is not
+    the sum of dropping its members -- the cost is a norm of a sum, so error
+    vectors cancel. This picks greedily against the joint objective instead,
+    which is the true ceiling for selection.
+
+    Not shippable, and not meant to be. It exists to say *why* recency wins,
+    not to beat it: if greedy joint selection converges on something shaped
+    like a contiguous window, contiguity stops being a lucky heuristic and
+    becomes the answer.
+    """
+
+    name = "setoracle"
+
+    def __init__(self, budget: int, sink: int = 2) -> None:
+        self.budget = budget
+        self.sink = sink
+        self._fallback = Recency(budget, sink)
+
+    def resident(self, n_full: int, num_computed: int) -> list[int]:
+        return self._fallback.resident(n_full, num_computed)
+
+
 class Full:
     """Everything resident. The control arm, and it must be bit-exact.
 
@@ -398,7 +424,7 @@ def choose(n_full: int, budget: int, sink: int, recent: int,
 
 
 POLICIES: dict[str, type[Policy]] = {
-    p.name: p for p in (Recency, Stress, Churn, Quest, MassOracle, ImpactOracle,
+    p.name: p for p in (Recency, Stress, Churn, Quest, MassOracle, ImpactOracle, SetOracle,
                         Oracle,
                         OracleLate, Full)
 }
