@@ -54,7 +54,28 @@ oppose each other cancel, and dropping them together is nearly free.
 Magnitude ranking is blind to that. On a small case, greedy joint selection
 reaches the brute-force optimum while marginal ranking is 16% worse.
 
-`setoracle` selects against the joint objective and is the true ceiling.
+`setoracle` selects against the joint objective, and it is the true ceiling.
+It ties recency too:
+
+| policy, block 1056 | agreement | copied out | fetched |
+|---|---|---|---|
+| `recency` | 0.2102 | 2,645 | **0** |
+| `quest` | 0.2087 | 6,454 | 3,807 |
+| **`setoracle`** | **0.2121** | **27,572** | **25,986** |
+
+A 0.0019 difference, deep inside a ~0.03 noise floor, for ten times the
+copy-out traffic and 26k fetches recency never makes.
+
+**That is the closing result.** The previous two oracles could each be
+dismissed on objective — mass is the wrong quantity, and a leave-one-out
+shift is the wrong way to choose a set. This one uses the exact joint cost,
+greedily minimised, verified against brute force. It is the best set of
+blocks obtainable with perfect knowledge, and it buys nothing.
+
+So contiguity is not a heuristic that happened to beat some bad estimators.
+**There is no set of blocks materially better than the most recent ones at
+these budgets** — which is why every signal failed, and why a better signal
+would not have helped.
 
 ## The proxy ran backwards
 

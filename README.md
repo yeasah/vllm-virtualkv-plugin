@@ -38,9 +38,15 @@ session:
 | `recency` | position only | **0.2374** |
 | `massoracle` | *true* attention mass | 0.2372 |
 | `impactoracle` | *true* marginal output shift | 0.2052 |
+| `setoracle` | the *optimal set*, greedily chosen | 0.2121 † |
 
-**Perfect knowledge of attention mass ties a policy that ignores it.** No
-estimator of that quantity could have won. Four confounds were cleared before
+† at block 1056, where `recency` scores 0.2102 — a tie, for ten times the
+copy-out traffic and 26k fetches recency never makes.
+
+**Perfect knowledge of attention mass ties a policy that ignores it, and so
+does the optimal set of blocks.** No estimator could have won, because there
+is nothing to estimate: at these budgets no set of blocks is materially
+better than the most recent ones. Four confounds were cleared before
 believing it — a sinkless baseline, unrepresentative decode volume,
 short contexts, and block granularity swept 16× on a model where block size
 is a free parameter. The full account is in
@@ -64,10 +70,10 @@ something similar:
   bounds cost the same whatever the block holds, so below **block size 72**
   the summary is larger than the block it describes. A quantized key summary
   is a flat 6.25% of the block at any size.
-- **Contiguity beats selection against exact knowledge.** Both oracles knew
-  everything and neither won, which points at the *set* rather than the
-  ranking: marginal per-block importance does not compose, because the cost
-  of dropping a set is a norm of a sum and error vectors cancel.
+- **Contiguity is not a heuristic; it is the answer.** Three oracles with
+  exact knowledge — attention mass, marginal output shift, and the optimal
+  set under the exact joint cost — all tie or lose to keeping the most recent
+  blocks. Worth knowing before building a scoring policy for a KV cache.
 
 The needle test still shows what the mechanism can do — on Llama-3.2-1B at
 12.4% residency an oracle reproduces the full-context answer token for token
