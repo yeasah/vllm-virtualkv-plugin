@@ -17,93 +17,62 @@ lets a policy be aggressive.
 
 ## Status
 
-The machinery works and is measured. **The shipped policy is not the one that
-makes it pay**, and that is the honest headline.
+**The machinery works. The policy work is finished, negatively, and the scope
+is narrower than it started.**
 
-On Llama-3.2-1B with 2048 tokens of context and a budget of 16 of 129 blocks —
-**12.4% resident** — a needle planted at a known block:
+What is proven: `full` and `churn` are bit-identical to running without the
+plugin, under 523k block moves; zero guard violations across ~230k guarded
+steps at 84k-token contexts; correct operation on a four-group hybrid with
+mamba state interleaved, on an EXL3 checkpoint. A block survives being
+destroyed on the GPU and restored from host memory into a *different*
+physical block, bit-identically.
 
-| policy | needle | output |
-|---|---|---|
-| none (no plugin) | found | the reference |
-| `full` (plugin, evicting nothing) | found | **bit-identical to the reference** |
-| `recency` | **lost** | diverges at step 2 |
-| `oracle` (told which block holds it) | found | **tokens identical to the reference** |
-
-So at 12% residency the mechanism reproduces a full-context answer token for
-token when the right blocks are kept, and loses it entirely when they are not.
-The mechanism is not the limit; the policy is.
-
-`recency` losing it is not a defect, it is what recency *is*: its window only
-slides forward, so it never asks for a block back and its fetch rate is zero
-after warm-up. That is StreamingLLM — and **it is not the baseline a scoring
-policy has to beat, because it is not a baseline at all**. Measured against a
-`truncate` arm that runs no plugin and simply cuts the prompt to the same
-tokens, on a real session at 33% residency:
-
-| arm | agreement | drift | turns identical |
-|---|---|---|---|
-| truncate (no plugin, shorter prompt) | 0.4565 | **0.0016** | **4/10** |
-| recency | 0.4606 | 0.0045 | 2/10 |
-| quest | 0.4296 | 0.0054 | 2/10 |
-
-Recency *is* truncation, and truncation is slightly better on the sensitive
-measures. The whole apparatus buys nothing over a shorter prompt there. The
-bar is beating truncation, and nothing here does it yet outside the needle.
-
-That is a statement about the workload as much as the policy: the session is
-chained four-turn conversations, so a 2048-token window holds the entire
-current topic and nothing distant is required. A harness cannot reward keeping
-context it never needs. The condition under which paging can pay is distant
-retrieval — which is exactly what the needle has and this does not. It also means the restore path, the entire
-difference between paging and eviction, is exercised by the tests and not by
-the default policy.
-
-**The demand signal is settled, negatively.** It was the plan when this
-started; it is not viable, and the evidence is not marginal.
-
-At a fixed budget on a real 84k-token agent session, ranked against a
-plain recency window:
+What is disproven is the thing this was for. A scored policy — the demand
+signal, the reason a pager beats an eviction method — lost **fourteen of
+fourteen** configurations across two architectures, three budgets, five block
+sizes and two model families. And at a fixed budget on a real 84k-token agent
+session:
 
 | policy | ranks on | agreement |
 |---|---|---|
-| recency | position only | **0.2374** |
+| `recency` | position only | **0.2374** |
 | `massoracle` | *true* attention mass | 0.2372 |
 | `impactoracle` | *true* marginal output shift | 0.2052 |
-| `quest` | bounds estimate of mass | 0.2256 |
 
-**Perfect knowledge of attention mass exactly ties a policy that ignores
-it**, and perfect knowledge of the output shift from dropping each block is
-worse. A scored policy lost every one of fourteen configurations across two
-architectures, three budgets, five block sizes and two model families, while
-paying 1.5-2.5x the copy-out traffic and thousands of fetches recency never
-makes. Mass capture -- the objective every signal here estimated -- ordered
-the policies *backwards* end to end.
+**Perfect knowledge of attention mass ties a policy that ignores it.** No
+estimator of that quantity could have won. Four confounds were cleared before
+believing it — a sinkless baseline, unrepresentative decode volume,
+short contexts, and block granularity swept 16× on a model where block size
+is a free parameter. The full account is in
+[`docs/demand-signal.md`](docs/demand-signal.md).
 
-Four confounds were checked and none of them was the cause. Sink allowance
-was equalised in tokens. Decode volume was made representative with
-`--thinking`. The baseline was corrected from a sinkless strawman. And
-granularity was swept 16x on a uniform-RoPE full-attention model, where
-block size is a free parameter rather than forced by a mamba page: the
-picture is flat.
+So the claim this README used to open with — that a mistaken decision is a
+*stall* rather than a wrong answer, which lets a policy be aggressive — is
+only half true in practice. The mechanism does make mistakes recoverable. But
+nothing found so far uses that to beat simply keeping the most recent blocks,
+and the one policy that does fetch is the one that loses.
 
-Two structural results came out of it that outlive the negative:
+**What remains is capacity, which never depended on any of it:** let a
+request declare a context larger than VRAM and pay for it in stalls rather
+than quality. That needs prefill residency and the startup check, not a
+cleverer policy. See [`TODO.md`](TODO.md).
 
-- **A fixed-size per-block summary does not scale down.** Quest-style bounds
-  cost `layers x kv_heads x 2 x head_size` whatever the block holds -- 288
-  KiB here -- so below **block size 72** the summary is larger than the block
-  it describes, and you could simply keep the block. A quantized key summary
-  is a flat 6.25% of the block at any size. If a summary is ever wanted
-  again, that is the shape it has to have.
-- **Contiguity beats selection**, and not because selection was estimated
-  badly. Both oracles had exact knowledge and neither won, which points at
-  the *set* rather than the *ranking*: marginal per-block importance does not
-  compose, and a contiguous window may simply be the right answer.
+Two results outlived the negative and are worth knowing if you are building
+something similar:
 
-What this leaves is the capacity argument, which never depended on any of
-it: declared context larger than VRAM, paid for in stalls rather than
-quality. That needs prefill residency and the startup check, not a better
-policy.
+- **A fixed-size per-block summary does not scale down.** Quest-style min/max
+  bounds cost the same whatever the block holds, so below **block size 72**
+  the summary is larger than the block it describes. A quantized key summary
+  is a flat 6.25% of the block at any size.
+- **Contiguity beats selection against exact knowledge.** Both oracles knew
+  everything and neither won, which points at the *set* rather than the
+  ranking: marginal per-block importance does not compose, because the cost
+  of dropping a set is a norm of a sum and error vectors cancel.
+
+The needle test still shows what the mechanism can do — on Llama-3.2-1B at
+12.4% residency an oracle reproduces the full-context answer token for token
+while recency loses it — so the ceiling is real. It is reaching it that has
+no known route.
 
 ## Use
 
@@ -244,15 +213,18 @@ generation runs against a restricted set. Adding prefill residency can lower
 quality and cannot raise it, so a policy that looks bad here will not look
 better later.
 
-That does not make the number uninteresting — it is the number for the shape
-most real work has, a long prompt and a short generation, where what matters is
-whether the few generated steps can reach the right blocks. Recency losing the
-needle at 12% residency is a real finding under exactly this reading.
+**And the shape of the workload decides how much that matters.** Paging pays
+most for a long prompt and a short generation, where the few generated steps
+have to reach back into a large context. It pays least for a long *reasoning*
+trace, because most of what such a model attends to during decode is its own
+recent output, which every arm has. That is not a small effect: measured on
+the same trajectory, going from 138 to 617 generated tokens per turn reversed
+which arm won.
 
 Four concurrent requests have been exercised (all four bit-identical under
-`churn`, zero guard violations over 88 steps, including the exclusivity check
-that catches two requests sharing a block). Contexts beyond a few thousand
-tokens have not.
+`churn`, including the exclusivity check that catches two requests sharing a
+block). Contexts to **84k tokens** have been exercised over 163 turns with
+zero guard violations across ~230k guarded steps.
 
 ## Limits
 
@@ -264,12 +236,36 @@ tokens have not.
   is live during prefill so an evicted block can be handed to another request
   by hash. None of that is measured. The cost: peak residency includes the
   whole prompt, so this bounds the decode footprint and not the prefill peak.
-- **Prefix caching off.** Untested with it on; see above for why it is not
-  merely untested but genuinely open.
-- **Full-attention layers only.** Sliding-window and other specs are passed
-  through untouched: their kernels rebuild key position from the block's index
-  in the row, which compaction breaks. Measured, not assumed.
+- **Prefix caching works.** `churn` is bit-identical with it on across a
+  growing multi-turn conversation. What is still unproven is the case where a
+  *second* request hits the hash of a block the first has evicted; a block
+  another live request holds is never evicted, since freeing a shared block
+  returns no memory while still costing a host slot.
+- **Full-attention layers only**, which is also what makes hybrids work.
+  Sliding-window and linear/GDN specs are passed through untouched — their
+  kernels rebuild key position from the block's index in the row, which
+  compaction breaks — so on a hybrid only the full-attention layers are
+  paged, which is correct.
+- **Hybrids need `VLLM_USE_V2_MODEL_RUNNER=1`.** vLLM defaults them to a
+  model runner this plugin does not patch, and the plugin then silently does
+  nothing. `fired_or_raise()` refuses rather than reporting; see
+  [`docs/hybrid.md`](docs/hybrid.md).
 - **Single GPU, eager.** No TP, no MLA, and CUDA graphs are unexercised.
+
+## Notes
+
+Subject notes live in `docs/`:
+
+- [`demand-signal.md`](docs/demand-signal.md) — the direction that closed,
+  what was measured, and the dead ends recorded so they are not retried.
+- [`granularity.md`](docs/granularity.md) — block size, where it comes from,
+  what it costs, and why quantising the KV cache coarsens it.
+- [`sink.md`](docs/sink.md) — two blocks hold half the attention mass, and the
+  default keeps far too few.
+- [`hybrid.md`](docs/hybrid.md) — four KV groups, two model runners with one
+  class name, and what works.
+- [`measurement.md`](docs/measurement.md) — how to measure this without
+  fooling yourself, and the instrument bugs that changed conclusions.
 
 ## Where this came from
 
