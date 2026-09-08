@@ -82,3 +82,49 @@ the prefix, which is where the mass is.
 change output at all, so that is kernel-level numerical variation — and it
 means cross-block-size comparisons carry baseline drift that small
 differences cannot be resolved against.
+
+## The sub-64 regime is the one open thread, and it is unreachable
+
+Everything measured above compares 64 against 1056. **Outcome was never
+measured below 64**, and the flat result there does not settle the question it
+looks like it settles.
+
+The hypothesis it leaves open: larger holes may be fundamentally different from
+smaller ones. If a dropped token's information survives in its neighbours —
+local redundancy, which language plainly has — then scattered single-token holes
+are recoverable while a contiguous 64-token hole removes a clause with no local
+backup. That predicts a sharp falloff with a knee at the correlation length ℓ.
+**If ℓ < 64, both of our operating points sit past the knee and the hypothesis
+predicts exactly the flat result we measured.** "No effect" and "effect with
+ℓ < 64" are observationally identical in this sweep.
+
+Two pieces of evidence point against, neither decisive. The mass curve above is
+smooth and monotonic down to 16 with no knee — weak, since mass has failed to
+predict output damage three times here, and local redundancy is not a mass
+mechanism. And SnapKV's pooling ablation (`eviction-survey.md`) has *coarsening*
+the kept set rescuing retrieval — confounded, because pooling changes which
+tokens are kept, not only the hole geometry.
+
+**The experiment that would settle it** is one nobody has run, because every arm
+in this project confounds hole geometry with selection: *random* dropping at
+granularity g. Fixed keep-fraction, holes at matched positions, g swept from 1,
+selection random throughout, with recency in as an arm — recency is g=∞ with the
+hole at the front, which makes it one sweep with the incumbent inside it. It is
+an attention-mask experiment, not an eviction one, so it needs no pager and can
+reach g=1, which no block-based mechanism can. Worth adding one scored arm at
+g=1: the policy negative was measured at ~40 units of freedom, and fine
+granularity is the one operating point where selection was never tested.
+
+**It stays unrun because both branches are dead ends here.** Nothing on a hybrid
+can act on a positive result — block size is floored at 528/1056 by page
+alignment, and the summary-size floor above puts it at 72 regardless — so
+exploiting it means token-granular eviction with physical compaction. And that
+forfeits prefix caching for the compacted region, inherently: a compacted block
+holds a different set of tokens than its hash claims. Rehashing does not rescue
+it, because a rehashed compacted block simply never hits again. A miss rather
+than a corruption, but the prefill comes back, which is TriAttention's
+disqualifier #1 and ~33 s per turn on a 40k conversation.
+
+So the sub-block arena is unavailable to any multi-turn use case, and the
+block-and-above arena is where `demand-signal.md` already ran. The thread is
+open and both ends are tied off.

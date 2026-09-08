@@ -176,3 +176,36 @@ neither won.
   attention runs, ranks at 0.3473 against recency's 0.2743 — real but not
   competitive. Only interesting for a prefill cold start, where nothing else
   can exist.
+
+## The published methods are bounded by `setoracle`
+
+Surveyed after the fact, to check whether anything scores a quantity that was
+not measured here. TriAttention, SnapKV and R-KV all reduce to per-token
+rankings, and every ranking is a weaker instrument than optimal set selection.
+Formulas, the one genuinely novel quantity (R-KV's redundancy term, which is not
+set-aware and therefore does not escape), and the shared blind spot — none of
+the three carries a recency baseline — are in `eviction-survey.md`.
+
+## What this result is and is not scoped to
+
+Recorded because the configuration was never varied, and it should not be
+rediscovered as a surprise.
+
+**Every arm here ran with the prompt attended in full during prefill**, and with
+prefix caching on, so per-turn prefill covered only the new suffix. In that
+regime the resident tail is a full-context encoding: recency already has
+indirect access to everything, and there is nothing in the offloaded blocks that
+is not also represented in what is resident.
+
+**The ranking survives that; the level probably does not.** Mass concentrating
+on recent blocks is RoPE decay plus learned locality, neither of which windowed
+prefill touches — under a worse tail encoding, attention still decays toward
+recency and `massoracle` still lands where `recency` already is. What is
+unmeasured is the *absolute* number under paged prefill, which can drop while
+the curve stays just as flat. That is a capacity result, not a policy one, and
+`capacity.md` is where it goes.
+
+The flatness itself is the strongest evidence against a suppressed signal: a
+methodological confound compresses a margin, it does not push perfect knowledge
+*below* a positional heuristic. `impactoracle` at 0.2052 against recency's
+0.2374 is an oracle paying a real churn cost for a benefit that is not there.

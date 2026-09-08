@@ -3,6 +3,10 @@
 Virtual memory for a vLLM KV cache. A request's context may be larger than the
 GPU can hold: the rest lives in host memory and comes back when it is wanted.
 
+> **Suspended, 2026-09-08.** The machinery works and is verified; both
+> directions it was built for are closed. The rest of this section describes
+> the design as built — read "Status" and "Why it is suspended" first.
+
 vLLM's PagedAttention virtualised the *allocation* of KV blocks. This
 virtualises their *residency*. The block table is a page table, the per-step
 view is address translation, and the host tier is swap.
@@ -17,8 +21,10 @@ lets a policy be aggressive.
 
 ## Status
 
-**The machinery works. The policy work is finished, negatively, and the scope
-is narrower than it started.**
+**Suspended, 2026-09-08.** The machinery works and is verified. Both directions
+it was built for are now closed — the demand signal negatively, capacity on
+arithmetic — and nothing is half-built. See "Why it is suspended" below and
+[`TODO.md`](TODO.md) for what would justify a revisit.
 
 What is proven: `full` and `churn` are bit-identical to running without the
 plugin, under 523k block moves; zero guard violations across ~230k guarded
@@ -58,10 +64,13 @@ only half true in practice. The mechanism does make mistakes recoverable. But
 nothing found so far uses that to beat simply keeping the most recent blocks,
 and the one policy that does fetch is the one that loses.
 
-**What remains is capacity, which never depended on any of it:** let a
-request declare a context larger than VRAM and pay for it in stalls rather
-than quality. That needs prefill residency and the startup check, not a
-cleverer policy. See [`TODO.md`](TODO.md).
+**And capacity, which never depended on any of it, does not survive its own
+transport arithmetic.** 20 ms of PCIe 5.0 x16 moves 1.05 GB — ~16k tokens on
+this geometry — against ~156k already resident on a 24 GiB card: +10% context
+for 2x step latency, and that is the favourable case. On a 16 GiB card it stops
+being a context trade at all and becomes "+1.0 bpw for 43% of throughput",
+arguable on the one 16 GiB card with a 5.0 x16 link and dead on the rest, which
+are x8. The full account is in [`docs/capacity.md`](docs/capacity.md).
 
 Two results outlived the negative and are worth knowing if you are building
 something similar:
@@ -79,6 +88,39 @@ The needle test still shows what the mechanism can do — on Llama-3.2-1B at
 12.4% residency an oracle reproduces the full-context answer token for token
 while recency loses it — so the ceiling is real. It is reaching it that has
 no known route.
+
+## Why it is suspended
+
+Three exits, taken in order, each closing a direction the previous one opened.
+
+1. **Selection is bounded and the bound ties recency.** `setoracle` picks the
+   optimal set under the exact joint cost; every published method reduces to a
+   per-token ranking, which is a strictly weaker instrument. TriAttention,
+   SnapKV and R-KV were all read in full and none scores a quantity outside
+   that bound — R-KV's redundancy term is genuinely different but is not
+   set-aware, so it does not escape. None of the three runs a recency baseline
+   at all. See [`docs/eviction-survey.md`](docs/eviction-survey.md).
+2. **Capacity does not survive its transport arithmetic.** Not at 24 GiB, where
+   it is +10% context for 2x latency; not at 16 GiB, where it becomes a
+   bpw-for-bandwidth trade that only one card can make; and the configuration
+   that *does* survive — recency with a host tier nothing ever reads — is a
+   serving-time sliding window that needs none of this machinery. See
+   [`docs/capacity.md`](docs/capacity.md).
+3. **The one open thread ends in a wall that is structural, not empirical.**
+   Outcome was never measured below block 64, and a sharp sub-64 regime driven
+   by local redundancy is consistent with everything we have. Acting on it
+   would mean token-granular eviction with physical compaction, which forfeits
+   prefix caching for the compacted region inherently — a compacted block holds
+   a different set of tokens than its hash claims. That rules out every
+   multi-turn use case this was built for, and the block-and-above arena is
+   where exit 1 already ran. See
+   [`docs/granularity.md`](docs/granularity.md).
+
+**What would justify a revisit** is in [`TODO.md`](TODO.md). Briefly: a demand
+signal that is not a function of the current cache state, a mechanism that
+changes *what is in* the cache rather than which parts survive, an upstream
+change decoupling attention and mamba page sizes, or an interconnect that is
+not PCIe. None of these is a matter of finishing something here.
 
 ## Use
 
@@ -272,6 +314,11 @@ Subject notes live in `docs/`:
   class name, and what works.
 - [`measurement.md`](docs/measurement.md) — how to measure this without
   fooling yourself, and the instrument bugs that changed conclusions.
+- [`capacity.md`](docs/capacity.md) — the transport arithmetic that closes the
+  capacity path, on both a 24 GiB and a 16 GiB card.
+- [`eviction-survey.md`](docs/eviction-survey.md) — what TriAttention, SnapKV
+  and R-KV actually score, why `setoracle` bounds all three, and the recency
+  baseline none of them runs.
 
 ## Where this came from
 
